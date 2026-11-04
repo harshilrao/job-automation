@@ -3,17 +3,26 @@ import { config } from '../config/env';
 
 /**
  * Encrypt sensitive data using AES-256
+ * Uses the encryption key as a passphrase (CryptoJS derives key via PBKDF2)
+ * Handles both strings and objects (stringifies objects)
  */
-export function encrypt(text: string): string {
+export function encrypt(data: string | object): string {
+  const text = typeof data === 'string' ? data : JSON.stringify(data);
   return CryptoJS.AES.encrypt(text, config.encryption.key).toString();
 }
 
 /**
  * Decrypt sensitive data
+ * Returns parsed object if the decrypted text is valid JSON, otherwise returns string
  */
-export function decrypt(encryptedText: string): string {
+export function decrypt(encryptedText: string): string | object {
   const bytes = CryptoJS.AES.decrypt(encryptedText, config.encryption.key);
-  return bytes.toString(CryptoJS.enc.Utf8);
+  const decrypted = bytes.toString(CryptoJS.enc.Utf8);
+  try {
+    return JSON.parse(decrypted);
+  } catch {
+    return decrypted;
+  }
 }
 
 /**

@@ -39,6 +39,54 @@ export const validate = (schema: ZodSchema) => {
 
 // Common validation schemas
 export const schemas = {
+  // Auth
+  register: z.object({
+    body: z.object({
+      email: z.string().email('Invalid email address'),
+      password: z.string().min(8, 'Password must be at least 8 characters'),
+      firstName: z.string().min(1).max(50).optional(),
+      lastName: z.string().min(1).max(50).optional(),
+    }),
+  }),
+
+  login: z.object({
+    body: z.object({
+      email: z.string().email('Invalid email address'),
+      password: z.string().min(1, 'Password is required'),
+    }),
+  }),
+
+  refreshToken: z.object({
+    body: z.object({
+      refreshToken: z.string().min(1, 'Refresh token is required'),
+    }),
+  }),
+
+  logout: z.object({
+    body: z.object({
+      refreshToken: z.string().optional(),
+    }),
+  }),
+
+  forgotPassword: z.object({
+    body: z.object({
+      email: z.string().email('Invalid email address'),
+    }),
+  }),
+
+  resetPassword: z.object({
+    body: z.object({
+      token: z.string().min(1, 'Reset token is required'),
+      password: z.string().min(8, 'Password must be at least 8 characters'),
+    }),
+  }),
+
+  verifyEmail: z.object({
+    body: z.object({
+      token: z.string().min(1, 'Verification token is required'),
+    }),
+  }),
+
   // Job search
   jobSearch: z.object({
     query: z.object({

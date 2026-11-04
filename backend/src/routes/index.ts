@@ -1,10 +1,14 @@
 import { Router } from 'express';
+import authRouter from './auth';
 import jobsRouter from './jobs';
 import applicationsRouter from './applications';
 import profileRouter from './profile';
 import aiRouter from './ai';
 
 const router = Router();
+
+// Auth routes (public)
+router.use('/auth', authRouter);
 
 // API version prefix
 router.use('/jobs', jobsRouter);
@@ -28,6 +32,7 @@ router.get('/', (req, res) => {
     version: '1.0.0',
     description: 'Automated job search and application system',
     endpoints: {
+      auth: '/api/auth',
       jobs: '/api/jobs',
       applications: '/api/applications',
       profile: '/api/profile',
