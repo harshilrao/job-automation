@@ -1,0 +1,113 @@
+version: '3.8'
+
+services:
+  # MongoDB (using Atlas in production, local for development)
+  mongodb:
+    image: mongo:7.0
+    container_name: job-automation-mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: password
+      MONGO_INITDB_DATABASE: job_automation
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for job queues and caching
+  redis:
+    image: redis:7-alpine
+    container_name: job-automation-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: development
+    container_name: job-automation-backend
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+      - MONGODB_URI=mongodb://admin:password@mongodb:27017/job_automation?authSource=admin
+      - MONGODB_DB_NAME=job_automation
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=${JWT_SECRET:-your-super-secret-jwt-key-change-in-production}
+      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET:-your-refresh-secret-change-in-production}
+      - FRONTEND_URL=http://localhost:5173
+      - FREE_CLAUDE_URL=http://host.docker.internal:8080
+      - FREE_CLAUDE_MODEL=open_router/openrouter/free
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-your-32-character-encryption-key-here}
+      - SCRAPER_CRON=0 */2 * * *
+      - APPLICATION_CRON=0 9 * * 1-5
+      - PLAYWRIGHT_HEADLESS=true
+      - PLAYWRIGHT_USER_DATA_DIR=/app/browser-profile
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+      - browser_profile:/app/browser-profile
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: npm run dev
+
+  # Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: development
+    container_name: job-automation-frontend
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:3000/api
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    command: npm run dev -- --host 0.0.0.0
+
+  # Playwright for browser automation (optional, for production)
+  playwright:
+    image: mcr.microsoft.com/playwright:v1.46.0-jammy
+    container_name: job-automation-playwright
+    environment:
+      - DISPLAY=:99
+    volumes:
+      - ./backend:/app
+      - browser_profile:/app/browser-profile
+    working_dir: /app
+    command: sleep infinity
+    profiles:
+      - browser
+
+volumes:
+  mongodb_data:
+  redis_data:
+  browser_profile:
+
+networks:
+  default:
+    name: job-automation-network
