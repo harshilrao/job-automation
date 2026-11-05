@@ -111,6 +111,7 @@ userSchema.methods.hasValidRefreshToken = function(token: string): boolean {
 };
 
 // Indexes
+userSchema.index({ email: 1 }, { unique: true });
 userSchema.index({ emailVerificationToken: 1 });
 userSchema.index({ passwordResetToken: 1 });
 

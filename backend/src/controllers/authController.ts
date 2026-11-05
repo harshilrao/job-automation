@@ -23,7 +23,8 @@ export const register = asyncHandler(async (req: Request, res: Response) => {
   });
 
   // Create initial empty profile with placeholder values for required fields
-  await UserProfile.create({
+  try {
+    await UserProfile.create({
     userId: user._id.toString(),
     personalInfo: {
       firstName: firstName || '',
@@ -57,6 +58,10 @@ export const register = asyncHandler(async (req: Request, res: Response) => {
       workAuthorization: 'Canadian Citizen',
     },
   });
+  } catch (profileError: any) {
+    logger.error('Profile creation error:', { message: profileError.message, stack: profileError.stack, errors: profileError.errors });
+    throw profileError;
+  }
 
   // Generate tokens
   const { accessToken, refreshToken } = generateTokens(user._id.toString(), user.email);
