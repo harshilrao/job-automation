@@ -217,11 +217,15 @@ export function JobDetail() {
     const pageWidth = doc.internal.pageSize.width || 210;
     const pageHeight = doc.internal.pageSize.height || 297;
     const margin = 15;
-    const fontSize = 10;
-    const lineHeight = fontSize * 1.5; // ~15mm per line
+    const baseFontSize = 10;
+    const lineHeight = baseFontSize * 1.5;
     const linesPerPage = Math.floor((pageHeight - margin * 2) / lineHeight);
 
-    doc.setFontSize(fontSize);
+    // Parse a line with **bold** inline markup into segments for jsPDF
+    const drawLine = (x: number, y: number, line: string, fontSize: number) => {
+      doc.setFontSize(fontSize);
+      doc.text(line, x, y);
+    };
 
     const lines = doc.splitTextToSize(content, pageWidth - margin * 2);
 
@@ -231,45 +235,95 @@ export function JobDetail() {
       }
       const pageIndex = index % linesPerPage;
       const y = margin + pageIndex * lineHeight;
-      doc.text(line, margin, y);
+
+      const trimmed = line.trim();
+      if (trimmed.startsWith('# ')) {
+        drawLine(margin, y, trimmed.replace('# ', ''), baseFontSize + 4);
+      } else if (trimmed.startsWith('## ')) {
+        drawLine(margin, y, trimmed.replace('## ', ''), baseFontSize + 2);
+      } else if (trimmed.startsWith('### ')) {
+        drawLine(margin, y, trimmed.replace('### ', ''), baseFontSize + 1);
+      } else {
+        drawLine(margin, y, line, baseFontSize);
+      }
     });
 
     doc.save(filename);
   };
 
+  // Parse **bold** inline markdown into an array of TextRun objects
+  const parseInlineRuns = (text: string) => {
+    const parts = text.split('**');
+    return parts.map((part, idx) => ({
+      text: part,
+      bold: idx % 2 === 1,
+    }));
+  };
+
   const downloadAsDOCX = async (content: string, filename: string) => {
     const lines = content.split('\n').map((line) => {
       const trimmed = line.trim();
+
+      if (trimmed.startsWith('# ')) {
+        return new Paragraph({
+          heading: HeadingLevel.TITLE,
+          children: parseInlineRuns(trimmed.replace('# ', '')).map((r) =>
+            new TextRun({ text: r.text, bold: r.bold, size: 28 })
+          ),
+          spacing: { before: 0, after: 200 },
+        });
+      }
       if (trimmed.startsWith('## ')) {
         return new Paragraph({
           heading: HeadingLevel.HEADING_2,
-          children: [new TextRun({ text: trimmed.replace('## ', ''), bold: true, size: 24 })],
+          children: parseInlineRuns(trimmed.replace('## ', '')).map((r) =>
+            new TextRun({ text: r.text, bold: r.bold, size: 24 })
+          ),
           spacing: { before: 200, after: 100 },
         });
       }
       if (trimmed.startsWith('### ')) {
         return new Paragraph({
           heading: HeadingLevel.HEADING_3,
-          children: [new TextRun({ text: trimmed.replace('### ', ''), bold: true, size: 22 })],
+          children: parseInlineRuns(trimmed.replace('### ', '')).map((r) =>
+            new TextRun({ text: r.text, bold: r.bold, size: 22 })
+          ),
           spacing: { before: 100, after: 60 },
-        });
-      }
-      if (trimmed.startsWith('# ')) {
-        return new Paragraph({
-          heading: HeadingLevel.TITLE,
-          children: [new TextRun({ text: trimmed.replace('# ', ''), bold: true, size: 28 })],
-          spacing: { before: 0, after: 200 },
         });
       }
       if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
         return new Paragraph({
-          children: [new TextRun({ text: trimmed.replace(/^[-*]\s/, '• '), size: 22 })],
+          children: parseInlineRuns(trimmed.replace(/^[-*]\s/, '• ')).map((r) =>
+            new TextRun({ text: r.text, bold: r.bold, size: 22 })
+          ),
           bullet: { level: 0 },
           spacing: { after: 40 },
         });
       }
+      // Table rows: | Col1 | Col2 |
+      if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+        const cells = trimmed
+          .slice(1, -1)
+          .split('|')
+          .map((c) => c.trim())
+          .filter((c) => c.length > 0);
+        if (cells.length > 0) {
+          const isHeader = cells.every((c) => c === c.toUpperCase() || c.includes('Category') || c.includes('Skills'));
+          return new Paragraph({
+            children: cells.map((cell) =>
+              new TextRun({
+                text: cell,
+                bold: isHeader,
+                size: 22,
+              })
+            ),
+            spacing: { after: 40 },
+            indent: { left: 360 },
+          });
+        }
+      }
       return new Paragraph({
-        children: [new TextRun({ text: trimmed, size: 22 })],
+        children: parseInlineRuns(trimmed).map((r) => new TextRun({ text: r.text, bold: r.bold, size: 22 })),
         spacing: { after: 60 },
         indent: { left: 360 },
       });
