@@ -197,7 +197,6 @@ export function JobDetail() {
         md += `### ${p.name}\n\n${p.description}\n\n`;
       });
     }
-    if (c.keywords?.length) md += `## Keywords\n\n${c.keywords.join(', ')}\n`;
     return md;
   };
 
@@ -243,20 +242,20 @@ export function JobDetail() {
       const response = await api.getResumeById(id);
       const resume = response.resume;
 
+      // Prefer raw AI-generated content (full readable resume) over structured object
+      const content = resume.rawContent || buildResumeMarkdown(resume);
+
       switch (downloadFormat) {
         case 'pdf': {
-          const markdown = buildResumeMarkdown(resume);
-          downloadAsPDF(markdown, `resume-v${resume.version}.pdf`);
+          downloadAsPDF(content, `resume-v${resume.version}.pdf`);
           break;
         }
         case 'docx': {
-          const markdown = buildResumeMarkdown(resume);
-          await downloadAsDOCX(markdown, `resume-v${resume.version}.docx`);
+          await downloadAsDOCX(content, `resume-v${resume.version}.docx`);
           break;
         }
         default: {
-          const markdown = buildResumeMarkdown(resume);
-          downloadFile(markdown, `resume-v${resume.version}.md`);
+          downloadFile(content, `resume-v${resume.version}.md`);
           break;
         }
       }
