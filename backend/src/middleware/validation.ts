@@ -4,19 +4,31 @@ import { logger } from '../utils/logger';
 
 export const validate = (schema: ZodSchema) => {
   return (req: Request, res: Response, next: NextFunction): void => {
+    console.log('[VALIDATION] Incoming request:', {
+      path: req.path,
+      method: req.method,
+      query: req.query,
+      body: req.body,
+      params: req.params,
+    });
+
     try {
       schema.parse({
         body: req.body,
         query: req.query,
         params: req.params,
       });
+      console.log('[VALIDATION] Passed:', req.path);
       next();
     } catch (error) {
       if (error instanceof z.ZodError) {
         const errors = error.errors.map(e => ({
           field: e.path.join('.'),
           message: e.message,
+          received: (error as any).errors.find((err: any) => err.path.join('.') === e.path.join('.'))?.received,
         }));
+
+        console.error('[VALIDATION] Failed:', req.path, errors);
 
         logger.warn('Validation failed', { errors, path: req.path });
 
@@ -96,17 +108,17 @@ export const schemas = {
       experienceLevels: z.array(z.string()).optional(),
       industries: z.array(z.string()).optional(),
       departments: z.array(z.string()).optional(),
-      salaryMin: z.number().optional(),
-      salaryMax: z.number().optional(),
-      postedWithinHours: z.number().optional(),
-      remoteOnly: z.boolean().optional(),
-      hybridOnly: z.boolean().optional(),
+      salaryMin: z.coerce.number().optional(),
+      salaryMax: z.coerce.number().optional(),
+      postedWithinHours: z.coerce.number().optional(),
+      remoteOnly: z.coerce.boolean().optional(),
+      hybridOnly: z.coerce.boolean().optional(),
       sources: z.array(z.string()).optional(),
       excludedCompanies: z.array(z.string()).optional(),
       excludedKeywords: z.array(z.string()).optional(),
       requiredKeywords: z.array(z.string()).optional(),
-      page: z.number().int().positive().default(1),
-      limit: z.number().int().positive().max(100).default(20),
+      page: z.coerce.number().int().positive().default(1),
+      limit: z.coerce.number().int().positive().max(100).default(20),
       sortBy: z.enum(['postedDate', 'salaryMax', 'title', 'company', 'matchScore']).default('postedDate'),
       sortOrder: z.enum(['asc', 'desc']).default('desc'),
     }),
@@ -247,8 +259,8 @@ export const schemas = {
   // Pagination
   pagination: z.object({
     query: z.object({
-      page: z.number().int().positive().default(1),
-      limit: z.number().int().positive().max(100).default(20),
+      page: z.coerce.number().int().positive().default(1),
+      limit: z.coerce.number().int().positive().max(100).default(20),
     }),
   }),
 

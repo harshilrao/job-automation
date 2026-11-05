@@ -67,41 +67,54 @@ export class JobScraperService {
     const allJobs: JobPost[] = [];
     const errors: Record<string, string> = {};
 
-    logger.info('Starting job scraping', { config: cfg });
+    console.log('[SCRAPER] scrapeAllJobs started', {
+      sources: cfg.sources,
+      locations: cfg.locations,
+      searchTerms: cfg.searchTerms,
+      resultsWanted: cfg.resultsWanted,
+      hoursOld: cfg.hoursOld,
+    });
 
     // Scrape from each source using Python JobSpy
     for (const source of cfg.sources) {
+      console.log(`[SCRAPER] Starting scrape for source: ${source}`);
       try {
         const jobs = await this.scrapeSource(source, cfg);
+        console.log(`[SCRAPER] Source ${source} returned ${jobs.length} jobs`);
         allJobs.push(...jobs);
-        logger.info(`Scraped ${jobs.length} jobs from ${source}`);
         await sleep(SCRAPER_DEFAULTS.RATE_LIMIT_DELAY);
       } catch (error: any) {
+        console.error(`[SCRAPER] Source ${source} FAILED:`, error.message);
         errors[source] = error.message;
-        logger.error(`Failed to scrape ${source}:`, error.message);
       }
     }
 
     // Also try Job Bank CSV (Government of Canada)
+    console.log('[SCRAPER] Starting Job Bank CSV scrape');
     try {
       const jobBankJobs = await this.scrapeJobBank();
+      console.log(`[SCRAPER] Job Bank returned ${jobBankJobs.length} jobs`);
       allJobs.push(...jobBankJobs);
-      logger.info(`Scraped ${jobBankJobs.length} jobs from Job Bank`);
     } catch (error: any) {
+      console.error('[SCRAPER] Job Bank FAILED:', error.message);
       errors['jobbank'] = error.message;
-      logger.warn('Job Bank scraping failed:', error.message);
     }
+
+    console.log(`[SCRAPER] Total raw jobs collected: ${allJobs.length}`);
 
     // Deduplicate jobs
     const uniqueJobs = this.deduplicateJobs(allJobs);
+    console.log(`[SCRAPER] After dedup: ${uniqueJobs.length} unique jobs`);
 
     // Save to database
+    console.log('[SCRAPER] Saving jobs to database...');
     const savedCount = await this.saveJobs(uniqueJobs);
+    console.log(`[SCRAPER] Saved ${savedCount} new jobs to database`);
 
     const duration = Date.now() - startTime;
-    logger.info('Job scraping completed', {
+    console.log('[SCRAPER] scrapeAllJobs completed', {
       duration,
-      totalFound: allJobs.length,
+      totalRaw: allJobs.length,
       uniqueJobs: uniqueJobs.length,
       saved: savedCount,
       errors: Object.keys(errors),
@@ -124,8 +137,11 @@ export class JobScraperService {
   private async scrapeSource(source: string, config: ScraperConfig): Promise<JobPost[]> {
     const allJobs: JobPost[] = [];
 
+    console.log(`[SCRAPER:${source}] Starting scrapeSource with ${config.locations.length} locations x ${config.searchTerms.length} search terms`);
+
     for (const location of config.locations) {
       for (const searchTerm of config.searchTerms) {
+        console.log(`[SCRAPER:${source}] Scraping "${searchTerm}" in "${location}"`);
         try {
           const jobs = await retry(
             () => this.runPythonJobSpy(source, searchTerm, location, config),
@@ -133,10 +149,13 @@ export class JobScraperService {
           );
 
           if (jobs && jobs.length > 0) {
+            console.log(`[SCRAPER:${source}] Found ${jobs.length} jobs for "${searchTerm}" in "${location}"`);
             allJobs.push(...jobs);
+          } else {
+            console.log(`[SCRAPER:${source}] No jobs found for "${searchTerm}" in "${location}"`);
           }
         } catch (error: any) {
-          logger.error(`${source} failed for ${searchTerm} in ${location}:`, error.message);
+          console.error(`[SCRAPER:${source}] Failed for "${searchTerm}" in "${location}":`, error.message);
         }
 
         // Small delay between searches
@@ -144,6 +163,7 @@ export class JobScraperService {
       }
     }
 
+    console.log(`[SCRAPER:${source}] Total from this source: ${allJobs.length} jobs`);
     return allJobs;
   }
 
@@ -168,11 +188,21 @@ export class JobScraperService {
 
       const siteName = siteMap[source] || source;
 
+      console.log(`[SCRAPER:${source}] Spawning Python JobSpy for "${searchTerm}" in "${location}" (site: ${siteName})`);
+
       // Python script to run JobSpy
       const pythonScript = `
 import sys
 import json
+import math
 from jobspy import scrape_jobs
+
+def safe_float(val):
+    try:
+        f = float(val)
+        return f if not math.isnan(f) else None
+    except (TypeError, ValueError):
+        return None
 
 try:
     jobs = scrape_jobs(
@@ -188,7 +218,7 @@ try:
     result = []
     for _, row in jobs.iterrows():
         job = {
-            'id': f"{source}-{row.get('job_id', '')}-{hash(str(row.get('title', '')) + str(row.get('company', '')))}",
+            'id': f"${source}-{row.get('job_id', '')}",
             'title': str(row.get('title', '')),
             'company': str(row.get('company', '')),
             'location': str(row.get('location', '')),
@@ -198,8 +228,8 @@ try:
             'source': "${source}",
             'datePosted': str(row.get('date_posted', '')) if row.get('date_posted') else '',
             'salary': {
-                'min': float(row.get('min_amount', 0)) if row.get('min_amount') else None,
-                'max': float(row.get('max_amount', 0)) if row.get('max_amount') else None,
+                'min': safe_float(row.get('min_amount', 0)),
+                'max': safe_float(row.get('max_amount', 0)),
                 'currency': str(row.get('currency', 'CAD')) if row.get('currency') else 'CAD',
                 'type': str(row.get('interval', 'yearly')) if row.get('interval') else 'yearly',
             },
@@ -237,7 +267,13 @@ except Exception as e:
       });
 
       pythonProcess.on('close', (code) => {
+        console.log(`[SCRAPER:${source}] Python process exited with code ${code}`, {
+          stdoutLength: stdout.length,
+          stderrLength: stderr.length,
+        });
+
         if (code !== 0) {
+          console.error(`[SCRAPER:${source}] Python JobSpy FAILED (code ${code}):`, stderr);
           reject(new Error(`Python JobSpy failed (code ${code}): ${stderr}`));
           return;
         }
@@ -245,6 +281,7 @@ except Exception as e:
         try {
           const result = JSON.parse(stdout.trim());
           if (Array.isArray(result)) {
+            console.log(`[SCRAPER:${source}] Python returned ${result.length} jobs`);
             // Convert datePosted strings to Date objects
             const jobs = result.map((job: any) => ({
               ...job,
@@ -252,16 +289,20 @@ except Exception as e:
             }));
             resolve(jobs);
           } else if (result.error) {
+            console.error(`[SCRAPER:${source}] Python returned error:`, result.error);
             reject(new Error(result.error));
           } else {
+            console.log(`[SCRAPER:${source}] Python returned empty result`);
             resolve([]);
           }
         } catch (e: any) {
+          console.error(`[SCRAPER:${source}] Failed to parse Python output:`, e.message, 'Output:', stdout);
           reject(new Error(`Failed to parse Python output: ${e.message}\nOutput: ${stdout}`));
         }
       });
 
       pythonProcess.on('error', (err) => {
+        console.error(`[SCRAPER:${source}] Failed to spawn Python process:`, err.message);
         reject(new Error(`Failed to spawn Python process: ${err.message}`));
       });
     });
@@ -415,6 +456,10 @@ except Exception as e:
    */
   private async saveJobs(jobs: JobPost[]): Promise<number> {
     let saved = 0;
+    let updated = 0;
+    let skipped = 0;
+
+    console.log(`[SCRAPER] saveJobs starting with ${jobs.length} jobs`);
 
     for (const job of jobs) {
       try {
@@ -427,16 +472,20 @@ except Exception as e:
           // Update if newer
           if (job.datePosted && job.datePosted > existing.postedDate) {
             await this.updateJobPosting(existing, job);
+            updated++;
+          } else {
+            skipped++;
           }
         } else {
           await this.createJobPosting(job);
           saved++;
         }
       } catch (error: any) {
-        logger.error('Failed to save job:', error.message, { jobId: job.id });
+        console.error(`[SCRAPER] Failed to save job ${job.id}:`, error.message);
       }
     }
 
+    console.log(`[SCRAPER] saveJobs completed: saved=${saved}, updated=${updated}, skipped=${skipped}`);
     return saved;
   }
 

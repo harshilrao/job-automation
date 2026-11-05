@@ -20,12 +20,13 @@ router.get('/departments', jobController.getDepartments);
 router.use(authenticate);
 
 router.get('/search', validate(schemas.jobSearch), jobController.searchJobs);
-router.get('/:id', validate(schemas.jobId), jobController.getJobById);
 
-// Search filters
-router.post('/filters', validate(schemas.jobSearchFilter), jobController.saveSearchFilter);
+// Search filters (must come before /:id route to avoid :id capturing 'filters')
 router.get('/filters', jobController.getSearchFilters);
 router.get('/filters/default', jobController.getDefaultSearchFilter);
+
+router.get('/:id', validate(schemas.jobId), jobController.getJobById);
+router.post('/filters', validate(schemas.jobSearchFilter), jobController.saveSearchFilter);
 router.put('/filters/:id', validate(schemas.idParam), jobController.updateSearchFilter);
 router.delete('/filters/:id', validate(schemas.idParam), jobController.deleteSearchFilter);
 router.post('/filters/:id/default', validate(schemas.idParam), jobController.setDefaultSearchFilter);

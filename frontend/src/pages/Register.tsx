@@ -38,7 +38,8 @@ export function Register() {
 
   const password = watch('password');
 
-  const getPasswordStrength = (pwd: string) => {
+  const getPasswordStrength = (pwd: string | undefined) => {
+    if (!pwd) return 0;
     let strength = 0;
     if (pwd.length >= 8) strength++;
     if (/[A-Z]/.test(pwd)) strength++;

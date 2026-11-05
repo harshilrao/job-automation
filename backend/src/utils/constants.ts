@@ -160,7 +160,7 @@ export const COVER_LETTER_TONES = [
 ] as const;
 
 export const SCRAPER_DEFAULTS = {
-  RESULTS_WANTED: 50,
+  RESULTS_WANTED: 3,
   HOURS_OLD: 72,
   COUNTRY_INDEED: 'Canada',
   RATE_LIMIT_DELAY: 2000,

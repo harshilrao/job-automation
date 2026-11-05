@@ -36,6 +36,7 @@ interface Config {
   ai: {
     openRouterApiKey?: string;
     groqApiKey?: string;
+    groqModel?: string;
     anthropicApiKey?: string;
   };
 
@@ -163,6 +164,7 @@ export const config: Config = {
   ai: {
     openRouterApiKey: process.env.OPENROUTER_API_KEY,
     groqApiKey: process.env.GROQ_API_KEY,
+    groqModel: getEnv('GROQ_MODEL', 'openai/gpt-oss-120b'),
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,
   },
   playwright: {
@@ -197,16 +199,11 @@ export const config: Config = {
     maxRequests: getEnvNumber('RATE_LIMIT_MAX_REQUESTS', 100),
   },
   jobSearch: {
-    cities: getEnvArray('ONTARIO_CITIES', [
-      'Toronto', 'Ottawa', 'Mississauga', 'Brampton', 'Hamilton',
-      'London', 'Markham', 'Vaughan', 'Windsor', 'Kitchener',
-      'Oakville', 'Richmond Hill', 'Burlington', 'Oshawa', 'Barrie',
-      'Guelph', 'St. Catharines', 'Kingston', 'Peterborough', 'Waterloo'
-    ]),
+    cities: getEnvArray('ONTARIO_CITIES', ['Toronto']),
     sources: getEnvArray('JOB_SOURCES', ['indeed', 'linkedin', 'glassdoor', 'ziprecruiter']),
     searchTerms: getEnvArray('JOB_SEARCH_TERMS', [
-      'software engineer', 'developer', 'programmer', 'full stack',
-      'backend', 'frontend', 'devops', 'data scientist', 'ml engineer', 'ai engineer'
+      'it support', 'help desk', 'technical support', 'desktop support',
+      'system administrator', 'network administrator'
     ]),
   },
 };

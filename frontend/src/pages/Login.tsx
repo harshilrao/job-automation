@@ -5,6 +5,7 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { Briefcase, Mail, Lock, Eye, EyeOff } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
+import { clsx } from 'clsx';
 
 const loginSchema = z.object({
   email: z.string().email('Invalid email address'),
@@ -175,5 +176,3 @@ export function Login() {
     </div>
   );
 }
-
-import { clsx } from 'clsx';

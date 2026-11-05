@@ -164,11 +164,20 @@ export const getJobStats = asyncHandler(async (req: AuthenticatedRequest, res: R
 
 export const triggerScrape = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const userId = req.user?.userId;
+  console.log('[SCRAPE] triggerScrape called, userId:', userId);
   if (!userId) {
     throw createError('Authentication required', 'AUTHENTICATION_ERROR', 401);
   }
 
+  console.log('[SCRAPE] Calling jobScraperService.scrapeAllJobs()');
   const result = await jobScraperService.scrapeAllJobs();
+
+  console.log('[SCRAPE] scrapeAllJobs completed:', {
+    totalFound: result.meta.totalFound,
+    uniqueJobs: result.meta.totalFound,
+    errors: Object.keys(result.errors),
+    duration: result.meta.duration,
+  });
 
   res.json({
     message: 'Scraping completed',
@@ -208,11 +217,13 @@ export const saveSearchFilter = asyncHandler(async (req: AuthenticatedRequest, r
 
 export const getSearchFilters = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const userId = req.user?.userId;
+  console.log('[JOBS] getSearchFilters called, userId:', userId);
   if (!userId) {
     throw createError('Authentication required', 'AUTHENTICATION_ERROR', 401);
   }
 
   const filters = await JobSearchFilter.find({ userId }).sort({ isDefault: -1, updatedAt: -1 });
+  console.log('[JOBS] getSearchFilters found', filters.length, 'filters');
   res.json({ filters });
 });
 

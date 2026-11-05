@@ -20,35 +20,47 @@ class ApiService {
     // Load tokens from localStorage
     this.accessToken = localStorage.getItem('accessToken');
     this.refreshToken = localStorage.getItem('refreshToken');
+    console.log('[API] Initialized. baseURL:', API_BASE_URL, '| hasAccessToken:', !!this.accessToken, '| hasRefreshToken:', !!this.refreshToken);
 
     // Request interceptor
     this.client.interceptors.request.use(
       (config: InternalAxiosRequestConfig) => {
+        console.log('[API] Request:', config.method?.toUpperCase(), config.url, this.accessToken ? 'with Bearer token' : 'WITHOUT token');
         if (this.accessToken) {
           config.headers.Authorization = `Bearer ${this.accessToken}`;
         }
         return config;
       },
-      (error) => Promise.reject(error)
+      (error) => {
+        console.error('[API] Request error:', error);
+        return Promise.reject(error);
+      }
     );
 
     // Response interceptor
     this.client.interceptors.response.use(
-      (response) => response,
+      (response) => {
+        console.log('[API] Response:', response.status, response.config.url);
+        return response;
+      },
       async (error: AxiosError<ApiError>) => {
         const originalRequest = error.config as InternalAxiosRequestConfig & { _retry?: boolean };
+        console.error('[API] Response error:', error.response?.status, error.response?.data, error.config?.url);
 
         if (error.response?.status === 401 && !originalRequest._retry) {
+          console.log('[API] Got 401, attempting token refresh for:', originalRequest.url);
           originalRequest._retry = true;
 
           try {
             await this.refreshAccessToken();
             if (this.accessToken) {
+              console.log('[API] Token refresh succeeded, retrying:', originalRequest.url);
               originalRequest.headers.Authorization = `Bearer ${this.accessToken}`;
               return this.client(originalRequest);
             }
           } catch {
             // Refresh failed, redirect to login
+            console.error('[API] Token refresh failed, clearing tokens and redirecting to /login');
             this.clearTokens();
             window.location.href = '/login';
           }
@@ -66,10 +78,11 @@ class ApiService {
       refreshToken: this.refreshToken,
     });
 
-    this.setTokens(response.data.accessToken, response.data.refreshToken);
+    this.setTokens(response.data.tokens.accessToken, response.data.tokens.refreshToken);
   }
 
   setTokens(accessToken: string, refreshToken: string): void {
+    console.log('[API] setTokens: saving accessToken and refreshToken to memory + localStorage');
     this.accessToken = accessToken;
     this.refreshToken = refreshToken;
     localStorage.setItem('accessToken', accessToken);
@@ -77,6 +90,7 @@ class ApiService {
   }
 
   clearTokens(): void {
+    console.log('[API] clearTokens: removing tokens from memory + localStorage');
     this.accessToken = null;
     this.refreshToken = null;
     localStorage.removeItem('accessToken');
@@ -89,24 +103,41 @@ class ApiService {
 
   // Auth endpoints
   async login(email: string, password: string) {
-    const response = await this.client.post('/auth/login', { email, password });
-    this.setTokens(response.data.accessToken, response.data.refreshToken);
-    return response.data;
+    console.log('[API] login called for:', email);
+    try {
+      const response = await this.client.post('/auth/login', { email, password });
+      console.log('[API] login response:', response.status, response.data);
+      this.setTokens(response.data.tokens.accessToken, response.data.tokens.refreshToken);
+      return response.data;
+    } catch (error: any) {
+      console.error('[API] login error:', error.response?.status, error.response?.data || error.message);
+      throw error;
+    }
   }
 
   async register(data: { email: string; password: string; firstName: string; lastName: string }) {
-    const response = await this.client.post('/auth/register', data);
-    this.setTokens(response.data.accessToken, response.data.refreshToken);
-    return response.data;
+    console.log('[API] register called for:', data.email);
+    try {
+      const response = await this.client.post('/auth/register', data);
+      console.log('[API] register response:', response.status, response.data);
+      this.setTokens(response.data.tokens.accessToken, response.data.tokens.refreshToken);
+      return response.data;
+    } catch (error: any) {
+      console.error('[API] register error:', error.response?.status, error.response?.data || error.message);
+      throw error;
+    }
   }
 
   async logout() {
+    console.log('[API] logout called');
     await this.client.post('/auth/logout');
     this.clearTokens();
   }
 
   async getMe() {
+    console.log('[API] getMe called');
     const response = await this.client.get('/auth/me');
+    console.log('[API] getMe response:', response.status, response.data);
     return response.data;
   }
 
@@ -132,7 +163,9 @@ class ApiService {
     sortBy?: string;
     sortOrder?: string;
   }) {
+    console.log('[API] searchJobs called with params:', params);
     const response = await this.client.get('/jobs/search', { params });
+    console.log('[API] searchJobs response:', response.status, JSON.stringify(response.data).slice(0, 500));
     return response.data;
   }
 
@@ -198,8 +231,15 @@ class ApiService {
   }
 
   async getSearchFilters() {
-    const response = await this.client.get('/jobs/filters');
-    return response.data;
+    console.log('[API] getSearchFilters called');
+    try {
+      const response = await this.client.get('/jobs/filters');
+      console.log('[API] getSearchFilters response:', response.status, response.data);
+      return response.data;
+    } catch (error: any) {
+      console.error('[API] getSearchFilters error:', error.response?.status, error.response?.data || error.message);
+      throw error;
+    }
   }
 
   async getDefaultSearchFilter() {

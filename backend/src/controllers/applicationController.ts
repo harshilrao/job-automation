@@ -220,6 +220,7 @@ export const generateResume = asyncHandler(async (req: AuthenticatedRequest, res
   }
 
   const { jobPostingId, tone, focusKeywords, model } = req.body;
+  console.log('[RESUME] generateResume called:', { userId, jobPostingId, tone, focusKeywords, model });
 
   const userProfile = await req.userProfile;
   if (!userProfile) {
@@ -231,11 +232,23 @@ export const generateResume = asyncHandler(async (req: AuthenticatedRequest, res
     throw createError('Job posting not found', 'NOT_FOUND', 404);
   }
 
+  console.log('[RESUME] User profile:', JSON.stringify(userProfile.toObject()).slice(0, 500));
+  console.log('[RESUME] Job posting:', JSON.stringify(jobPosting.toObject()).slice(0, 500));
+
   const result = await aiResumeGenerator.generateResume(
     userProfile.toObject(),
     jobPosting.toObject(),
     { tone, focusKeywords, model }
   );
+
+  console.log('[RESUME] Generation result:', {
+    model: result.model,
+    provider: result.provider,
+    contentLength: result.content?.length || 0,
+    contentPreview: result.content?.slice(0, 200),
+    atsScore: result.atsAnalysis?.score,
+    atsAnalysis: result.atsAnalysis,
+  });
 
   // Save the generated resume - parse content into IResumeContent structure
   const resumeContent: IResumeContent = {
@@ -259,6 +272,8 @@ export const generateResume = asyncHandler(async (req: AuthenticatedRequest, res
   generatedResume.atsAnalysis = result.atsAnalysis;
   generatedResume.status = 'draft';
   await generatedResume.save();
+
+  console.log('[RESUME] Saved to DB:', { id: generatedResume._id, status: generatedResume.status });
 
   res.json({
     resume: generatedResume,

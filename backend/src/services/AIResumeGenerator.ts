@@ -93,6 +93,7 @@ export class AIResumeGenerator {
       model,
       provider,
     });
+    console.log('[AI] Starting resume generation:', { model, provider, jobTitle: jobPosting.title });
 
     let content: string;
 
@@ -102,25 +103,42 @@ export class AIResumeGenerator {
       content = await this.generateWithOpenRouter(userProfile, jobPosting, options);
     } else if (provider === 'groq') {
       content = await this.generateWithGroq(userProfile, jobPosting, options);
+      console.log('[AI] Groq generation complete, content length:', content?.length || 0);
     } else {
       // Fallback to free-claude
       content = await this.generateWithFreeClaude(userProfile, jobPosting, options);
     }
 
-    // Analyze ATS compatibility
-    const atsAnalysis = await this.analyzeATSCompatibility(content, jobPosting.description);
+    console.log('[AI] Raw content generated:', { contentLength: content?.length || 0, preview: content?.slice(0, 200) });
+
+    // Analyze ATS compatibility (gracefully handle freeClaude being unavailable)
+    let atsAnalysis: ATSOptimizationResult = {
+      score: 0,
+      keywordMatch: 0,
+      formatScore: 0,
+      readabilityScore: 0,
+      missingKeywords: [],
+      suggestions: ['ATS analysis skipped'],
+    };
+    try {
+      atsAnalysis = await this.analyzeATSCompatibility(content, jobPosting.description);
+      console.log('[AI] ATS analysis result:', atsAnalysis);
+    } catch (error: any) {
+      logger.error('ATS analysis failed:', error);
+      console.error('[AI] ATS analysis error:', error.message);
+    }
 
     // If score is low, try to optimize
     let optimizedContent = content;
-    if (atsAnalysis.score < 75) {
-      optimizedContent = await this.optimizeForATS(content, jobPosting, atsAnalysis);
-      const reAnalysis = await this.analyzeATSCompatibility(optimizedContent, jobPosting.description);
-      if (reAnalysis.score > atsAnalysis.score) {
-        atsAnalysis.score = reAnalysis.score;
-        atsAnalysis.keywordMatch = reAnalysis.keywordMatch;
-        atsAnalysis.missingKeywords = reAnalysis.missingKeywords;
-        atsAnalysis.suggestions = reAnalysis.suggestions;
+    try {
+      if (atsAnalysis.score < 75) {
+        optimizedContent = await this.optimizeForATS(content, jobPosting, atsAnalysis);
+        console.log('[AI] ATS optimization complete, optimized length:', optimizedContent?.length || 0);
       }
+    } catch (error: any) {
+      logger.error('ATS optimization failed:', error);
+      console.error('[AI] ATS optimization error:', error.message);
+      optimizedContent = content;
     }
 
     return {
@@ -272,18 +290,23 @@ export class AIResumeGenerator {
 
     const systemPrompt = this.buildResumeSystemPrompt(options.tone || 'professional');
     const userPrompt = this.buildResumeUserPrompt(jobPosting, userProfile, options.focusKeywords);
+    const groqModel = options.model || config.ai.groqModel || 'openai/gpt-oss-120b';
+    console.log('[AI] Groq request:', { model: groqModel, jobTitle: jobPosting.title, company: jobPosting.company, promptLength: userPrompt.length });
 
     const response = await retry(
       () => axios.post(
         'https://api.groq.com/openai/v1/chat/completions',
         {
-          model: options.model || 'llama-3.3-70b-versatile',
+          model: groqModel,
           messages: [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt },
           ],
-          temperature: 0.3,
-          max_tokens: 4000,
+          temperature: 1,
+          max_completion_tokens: 2048,
+          top_p: 1,
+          reasoning_effort: 'medium',
+          stream: false,
         },
         {
           headers: {
@@ -295,6 +318,7 @@ export class AIResumeGenerator {
       { maxAttempts: 3, shouldRetry: (e) => e.response?.status === 429 || e.response?.status >= 500 }
     );
 
+    console.log('[AI] Groq response:', { status: response.status, hasChoices: Array.isArray(response.data.choices), contentLength: response.data.choices[0]?.message?.content?.length || 0 });
     return response.data.choices[0]?.message?.content || '';
   }
 
@@ -436,17 +460,17 @@ Optimize this resume for better ATS compatibility.`;
    * Get the best available model
    */
   private getBestModel(): string {
-    // Prefer free-claude-code as primary
-    if (config.freeClaude.url) {
+    // Prefer Groq (has working API key)
+    if (config.ai.groqApiKey) {
+      return config.ai.groqModel || 'openai/gpt-oss-120b';
+    }
+    // Prefer OpenRouter if configured
+    if (config.ai.openRouterApiKey) {
       return config.freeClaude.model;
     }
-    // Fallback to OpenRouter if configured
-    if (config.ai.openRouterApiKey) {
-      return 'openrouter/auto';
-    }
-    // Fallback to Groq
-    if (config.ai.groqApiKey) {
-      return 'llama-3.3-70b-versatile';
+    // Fallback to free-claude-code
+    if (config.freeClaude.url) {
+      return config.freeClaude.model;
     }
     return 'openrouter/auto';
   }
@@ -455,16 +479,21 @@ Optimize this resume for better ATS compatibility.`;
    * Get provider for a model
    */
   private getProviderForModel(model: string): string {
-    if (model.includes('free-claude') || model.includes('nvidia') || model.includes('gemini') || model.includes('deepseek')) {
+    // Models with open_router/ prefix are served via free-claude-code proxy
+    if (model.startsWith('open_router/')) {
       return 'free-claude-code';
     }
-    if (model.includes('openrouter')) {
+    if (model.includes('free-claude') || model.includes('gemini') || model.includes('deepseek')) {
+      return 'free-claude-code';
+    }
+    // nvidia/nemotron and other models served directly via OpenRouter API
+    if (model.includes('nvidia') || model.includes('openrouter') || model.includes('openrouter/')) {
       return 'openrouter';
     }
-    if (model.includes('groq') || model.includes('llama')) {
+    if (model.includes('groq') || model.includes('llama') || model.includes('gpt-oss') || model.includes('openai/')) {
       return 'groq';
     }
-    return 'free-claude-code';
+    return 'openrouter';
   }
 
   /**
