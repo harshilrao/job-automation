@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { MapPin, Clock, DollarSign, Building2, ExternalLink, Star, FileText, PenTool, Loader2, AlertCircle, CheckCircle, ArrowLeft } from 'lucide-react';
+import { MapPin, Clock, DollarSign, Building2, ExternalLink, Star, FileText, PenTool, Loader2, AlertCircle, CheckCircle, ArrowLeft, X } from 'lucide-react';
 import { api } from '../services/api';
 import { JobPosting, GeneratedResume, CoverLetter } from '@shared/types';
 import { formatDistanceToNow } from 'date-fns';
@@ -17,6 +17,12 @@ export function JobDetail() {
   const [coverLetters, setCoverLetters] = useState<CoverLetter[]>([]);
   const [generating, setGenerating] = useState(false);
   const [applyLoading, setApplyLoading] = useState(false);
+  const [viewModal, setViewModal] = useState<{
+    type: 'resume' | 'cover-letter';
+    id: string;
+    title: string;
+    content: string;
+  } | null>(null);
 
   useEffect(() => {
     if (id) {
@@ -114,6 +120,100 @@ export function JobDetail() {
     } finally {
       setGenerating(false);
     }
+  };
+
+  const handleViewResume = async (id: string) => {
+    try {
+      const response = await api.getResumeById(id);
+      const resume = response.resume;
+      setViewModal({
+        type: 'resume',
+        id,
+        title: `Resume v${resume.version}`,
+        content: JSON.stringify(resume.content, null, 2),
+      });
+    } catch (err: any) {
+      alert(err.response?.data?.error || 'Failed to load resume');
+    }
+  };
+
+  const handleDownloadResume = async (id: string) => {
+    try {
+      const response = await api.getResumeById(id);
+      const resume = response.resume;
+      const markdown = buildResumeMarkdown(resume);
+      downloadFile(markdown, `resume-v${resume.version}.md`);
+    } catch (err: any) {
+      alert(err.response?.data?.error || 'Failed to download resume');
+    }
+  };
+
+  const handleViewCoverLetter = (cl: CoverLetter) => {
+    setViewModal({
+      type: 'cover-letter',
+      id: cl._id,
+      title: `Cover Letter v${cl.version} (${cl.tone})`,
+      content: cl.content,
+    });
+  };
+
+  const handleDownloadCoverLetter = (cl: CoverLetter) => {
+    downloadFile(cl.content, `cover-letter-v${cl.version}.md`);
+  };
+
+  const closeModal = () => {
+    setViewModal(null);
+  };
+
+  const buildResumeMarkdown = (resume: any): string => {
+    const c = resume.content;
+    let md = `# Resume v${resume.version}\n\n`;
+    md += `**Model:** ${resume.aiModel}  \n`;
+    md += `**Provider:** ${resume.aiProvider}  \n`;
+    md += `**ATS Score:** ${resume.atsScore ?? 'N/A'}  \n`;
+    md += `**Status:** ${resume.status}  \n`;
+    md += `**Generated:** ${new Date(resume.createdAt).toLocaleString()}  \n\n`;
+    if (c.professionalSummary) md += `## Professional Summary\n\n${c.professionalSummary}\n\n`;
+    if (c.skills?.technical?.length) md += `## Technical Skills\n\n${c.skills.technical.join(', ')}\n\n`;
+    if (c.skills?.soft?.length) md += `## Soft Skills\n\n${c.skills.soft.join(', ')}\n\n`;
+    if (c.experience?.length) {
+      md += `## Professional Experience\n\n`;
+      c.experience.forEach((exp: any) => {
+        md += `### ${exp.position} at ${exp.company}\n\n`;
+        md += `${exp.startDate?.toLocaleDateString?.() || ''} – ${exp.current ? 'Present' : exp.endDate?.toLocaleDateString?.() || ''}\n\n`;
+        exp.bullets?.forEach((b: string) => md += `- ${b}\n`);
+        md += `\n`;
+      });
+    }
+    if (c.education?.length) {
+      md += `## Education\n\n`;
+      c.education.forEach((edu: any) => {
+        md += `### ${edu.degree} - ${edu.institution}\n\n`;
+        md += `${edu.fieldOfStudy}\n\n`;
+        edu.highlights?.forEach((h: string) => md += `- ${h}\n`);
+        md += `\n`;
+      });
+    }
+    if (c.projects?.length) {
+      md += `## Projects\n\n`;
+      c.projects.forEach((p: any) => {
+        md += `### ${p.name}\n\n${p.description}\n\n`;
+      });
+    }
+    if (c.keywords?.length) md += `## Keywords\n\n${c.keywords.join(', ')}\n`;
+    return md;
+  };
+
+  const downloadFile = (content: string, filename: string) => {
+    const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   if (loading) {
@@ -360,8 +460,18 @@ export function JobDetail() {
                       <p className="text-sm text-gray-600">Generated {formatDistanceToNow(new Date(resume.createdAt), { addSuffix: true })}</p>
                     </div>
                     <div className="flex items-center gap-2">
-                      <button className="btn-outline btn-sm">View</button>
-                      <button className="btn-outline btn-sm">Download</button>
+                      <button
+                        onClick={() => handleViewResume(resume._id)}
+                        className="btn-outline btn-sm"
+                      >
+                        View
+                      </button>
+                      <button
+                        onClick={() => handleDownloadResume(resume._id)}
+                        className="btn-outline btn-sm"
+                      >
+                        Download
+                      </button>
                     </div>
                   </div>
                 ))}
@@ -389,8 +499,18 @@ export function JobDetail() {
                     </div>
                     <p className="text-gray-700 line-clamp-3">{cl.content}</p>
                     <div className="flex items-center gap-2 mt-3">
-                      <button className="btn-outline btn-sm">View Full</button>
-                      <button className="btn-outline btn-sm">Download</button>
+                      <button
+                        onClick={() => handleViewCoverLetter(cl)}
+                        className="btn-outline btn-sm"
+                      >
+                        View Full
+                      </button>
+                      <button
+                        onClick={() => handleDownloadCoverLetter(cl)}
+                        className="btn-outline btn-sm"
+                      >
+                        Download
+                      </button>
                     </div>
                   </div>
                 ))}
@@ -439,6 +559,26 @@ export function JobDetail() {
               <p className="text-sm text-gray-600 text-center">
                 This will automatically fill and submit the application on {job.source.charAt(0).toUpperCase() + job.source.slice(1)}
               </p>
+            </div>
+          </div>
+        )}
+
+        {/* View Modal */}
+        {viewModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={closeModal}>
+            <div className="fixed inset-0 bg-black/50 backdrop-blur-sm" onClick={(e) => e.stopPropagation()} />
+            <div className="relative bg-white w-full max-w-3xl max-h-[90vh] overflow-hidden rounded-lg shadow-2xl border border-gray-200 mx-4">
+              <div className="flex items-center justify-between p-4 border-b border-gray-100 bg-gray-50">
+                <h3 className="text-lg font-semibold text-gray-900">{viewModal.title}</h3>
+                <button onClick={closeModal} className="text-gray-400 hover:text-gray-600">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="p-6 overflow-y-auto max-h-[75vh]">
+                <div className="prose prose-sm max-w-none text-gray-700 whitespace-pre-wrap break-words font-mono text-sm">
+                  {viewModal.content}
+                </div>
+              </div>
             </div>
           </div>
         )}

@@ -80,16 +80,16 @@ export interface IUserProfile extends Document {
 }
 
 const personalInfoSchema = new Schema<IPersonalInfo>({
-  firstName: { type: String, required: true, trim: true },
-  lastName: { type: String, required: true, trim: true },
-  email: { type: String, required: true, trim: true, lowercase: true },
-  phone: { type: String, required: true, trim: true },
+  firstName: { type: String, trim: true, default: '' },
+  lastName: { type: String, trim: true, default: '' },
+  email: { type: String, trim: true, lowercase: true, default: '' },
+  phone: { type: String, trim: true, default: '' },
   address: {
-    street: { type: String, required: true, trim: true },
-    city: { type: String, required: true, trim: true },
-    province: { type: String, required: true, trim: true },
-    postalCode: { type: String, required: true, trim: true },
-    country: { type: String, required: true, trim: true, default: 'Canada' },
+    street: { type: String, trim: true, default: '' },
+    city: { type: String, trim: true, default: '' },
+    province: { type: String, trim: true, default: 'ON' },
+    postalCode: { type: String, trim: true, default: '' },
+    country: { type: String, trim: true, default: 'Canada' },
   },
   linkedinUrl: { type: String, trim: true },
   githubUrl: { type: String, trim: true },
@@ -187,7 +187,6 @@ userProfileSchema.virtual('fullName').get(function() {
 });
 
 // Indexes
-userProfileSchema.index({ userId: 1 }, { unique: true });
 userProfileSchema.index({ 'personalInfo.email': 1 });
 userProfileSchema.index({ 'preferences.desiredRoles': 1 });
 userProfileSchema.index({ 'preferences.desiredLocations': 1 });

@@ -78,6 +78,16 @@ build/
 .temp/
 tmp/
 
+# Scraped data cache
+backend/data/
+
+# Screenshots and user-generated media
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+
 # Environment variables and secrets
 .env
 .env.*

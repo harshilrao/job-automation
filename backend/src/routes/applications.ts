@@ -13,6 +13,11 @@ router.get('/', applicationController.getApplications);
 router.get('/stats', applicationController.getApplicationStats);
 router.get('/intervention', applicationController.getNeedingIntervention);
 router.get('/queue', applicationController.getQueueStatus);
+
+// Specific routes must come before /:id to avoid :id capturing 'resumes'/'cover-letters'
+router.get('/resumes', applicationController.getResumes);
+router.get('/cover-letters', applicationController.getCoverLetters);
+
 router.get('/:id', validate(schemas.idParam), applicationController.getApplicationById);
 
 // Application actions
@@ -25,12 +30,10 @@ router.post('/search-and-queue', applicationController.searchAndQueueJobs);
 
 // Resume generation
 router.post('/resume/generate', validate(schemas.generateResume), applicationController.generateResume);
-router.get('/resumes', applicationController.getResumes);
 router.get('/resumes/:id', validate(schemas.idParam), applicationController.getResumeById);
 
 // Cover letter generation
 router.post('/cover-letter/generate', validate(schemas.generateCoverLetter), applicationController.generateCoverLetter);
-router.get('/cover-letters', applicationController.getCoverLetters);
 
 // ATS analysis
 router.post('/ats/analyze', applicationController.analyzeATS);
