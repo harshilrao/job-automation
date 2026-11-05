@@ -13,6 +13,7 @@ export interface ResumeGenerationOptions {
   focusKeywords?: string[];
   model?: string;
   provider?: string;
+  baseResumeText?: string;
 }
 
 export interface CoverLetterGenerationOptions {
@@ -247,7 +248,7 @@ export class AIResumeGenerator {
     }
 
     const systemPrompt = this.buildResumeSystemPrompt(options.tone || 'professional');
-    const userPrompt = this.buildResumeUserPrompt(jobPosting, userProfile, options.focusKeywords);
+    const userPrompt = this.buildResumeUserPrompt(jobPosting, userProfile, options.focusKeywords, options.baseResumeText);
 
     const response = await retry(
       () => axios.post(
@@ -289,7 +290,7 @@ export class AIResumeGenerator {
     }
 
     const systemPrompt = this.buildResumeSystemPrompt(options.tone || 'professional');
-    const userPrompt = this.buildResumeUserPrompt(jobPosting, userProfile, options.focusKeywords);
+    const userPrompt = this.buildResumeUserPrompt(jobPosting, userProfile, options.focusKeywords, options.baseResumeText);
     const groqModel = options.model || config.ai.groqModel || 'openai/gpt-oss-120b';
     console.log('[AI] Groq request:', { model: groqModel, jobTitle: jobPosting.title, company: jobPosting.company, promptLength: userPrompt.length });
 
@@ -539,8 +540,17 @@ Return the resume in a structured format with these sections:
   private buildResumeUserPrompt(
     jobPosting: any,
     userProfile: any,
-    focusKeywords?: string[]
+    focusKeywords?: string[],
+    baseResumeText?: string
   ): string {
+    const baseResumeSection = baseResumeText
+      ? `
+Existing Resume (use this as the foundation for the user's experience and background):
+${baseResumeText}
+
+`
+      : '';
+
     return `Job Description:
 ${jobPosting.description}
 
@@ -553,7 +563,7 @@ Experience Level: ${jobPosting.experienceLevel}
 User Profile:
 ${JSON.stringify(userProfile, null, 2)}
 
-${focusKeywords && focusKeywords.length > 0 ? `Focus Keywords to Emphasize: ${focusKeywords.join(', ')}` : ''}
+${baseResumeSection}${focusKeywords && focusKeywords.length > 0 ? `Focus Keywords to Emphasize: ${focusKeywords.join(', ')}` : ''}
 
 Create a tailored, ATS-optimized resume for this specific job. Return the resume content in a structured format.`;
   }

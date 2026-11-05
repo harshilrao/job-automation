@@ -20,7 +20,9 @@
     "date-fns": "^3.6.0",
     "lucide-react": "^0.414.0",
     "clsx": "^2.1.1",
-    "tailwind-merge": "^2.4.0"
+    "tailwind-merge": "^2.4.0",
+    "jspdf": "^2.5.2",
+    "docx": "^8.4.1"
   },
   "devDependencies": {
     "@types/react": "^18.3.3",

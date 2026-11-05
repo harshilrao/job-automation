@@ -336,8 +336,16 @@ class ApiService {
     tone?: string;
     focusKeywords?: string[];
     model?: string;
+    baseResumeText?: string;
   }) {
     const response = await this.client.post('/applications/resume/generate', data);
+    return response.data;
+  }
+
+  async uploadResume(formData: FormData) {
+    const response = await this.client.post('/applications/resume/upload', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
     return response.data;
   }
 

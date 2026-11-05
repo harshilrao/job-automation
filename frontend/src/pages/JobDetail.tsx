@@ -1,10 +1,14 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { MapPin, Clock, DollarSign, Building2, ExternalLink, Star, FileText, PenTool, Loader2, AlertCircle, CheckCircle, ArrowLeft, X } from 'lucide-react';
+import { MapPin, Clock, DollarSign, Building2, ExternalLink, Star, FileText, PenTool, Loader2, AlertCircle, CheckCircle, ArrowLeft, X, Upload } from 'lucide-react';
 import { api } from '../services/api';
 import { JobPosting, GeneratedResume, CoverLetter } from '@shared/types';
 import { formatDistanceToNow } from 'date-fns';
 import { clsx } from 'clsx';
+import jsPDF from 'jspdf';
+import { Document, Packer, Paragraph, TextRun, HeadingLevel } from 'docx';
+
+const DOWNLOAD_FORMATS: ('markdown' | 'pdf' | 'docx')[] = ['markdown', 'pdf', 'docx'];
 
 export function JobDetail() {
   const { id } = useParams<{ id: string }>();
@@ -23,6 +27,9 @@ export function JobDetail() {
     title: string;
     content: string;
   } | null>(null);
+  const [downloadFormat, setDownloadFormat] = useState<'markdown' | 'pdf' | 'docx'>('markdown');
+  const [uploadingResume, setUploadingResume] = useState(false);
+  const [baseResumeText, setBaseResumeText] = useState<string>('');
 
   useEffect(() => {
     if (id) {
@@ -113,6 +120,7 @@ export function JobDetail() {
       await api.generateResume({
         jobPostingId: job._id,
         tone: 'professional',
+        baseResumeText: baseResumeText || undefined,
       });
       loadResumes();
     } catch (err: any) {
@@ -130,21 +138,10 @@ export function JobDetail() {
         type: 'resume',
         id,
         title: `Resume v${resume.version}`,
-        content: JSON.stringify(resume.content, null, 2),
+        content: resume.rawContent || JSON.stringify(resume.content, null, 2),
       });
     } catch (err: any) {
       alert(err.response?.data?.error || 'Failed to load resume');
-    }
-  };
-
-  const handleDownloadResume = async (id: string) => {
-    try {
-      const response = await api.getResumeById(id);
-      const resume = response.resume;
-      const markdown = buildResumeMarkdown(resume);
-      downloadFile(markdown, `resume-v${resume.version}.md`);
-    } catch (err: any) {
-      alert(err.response?.data?.error || 'Failed to download resume');
     }
   };
 
@@ -200,7 +197,6 @@ export function JobDetail() {
         md += `### ${p.name}\n\n${p.description}\n\n`;
       });
     }
-    if (c.keywords?.length) md += `## Keywords\n\n${c.keywords.join(', ')}\n`;
     return md;
   };
 
@@ -214,6 +210,184 @@ export function JobDetail() {
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
+  };
+
+  const downloadAsPDF = (content: string, filename: string) => {
+    const doc = new jsPDF();
+    const pageWidth = doc.internal.pageSize.width || 210;
+    const pageHeight = doc.internal.pageSize.height || 297;
+    const margin = 15;
+    const baseFontSize = 10;
+    const lineHeight = baseFontSize * 1.5;
+    const linesPerPage = Math.floor((pageHeight - margin * 2) / lineHeight);
+
+    // Parse a line with **bold** inline markup into segments for jsPDF
+    const drawLine = (x: number, y: number, line: string, fontSize: number) => {
+      doc.setFontSize(fontSize);
+      doc.text(line, x, y);
+    };
+
+    const lines = doc.splitTextToSize(content, pageWidth - margin * 2);
+
+    lines.forEach((line: string, index: number) => {
+      if (index > 0 && index % linesPerPage === 0) {
+        doc.addPage();
+      }
+      const pageIndex = index % linesPerPage;
+      const y = margin + pageIndex * lineHeight;
+
+      const trimmed = line.trim();
+      if (trimmed.startsWith('# ')) {
+        drawLine(margin, y, trimmed.replace('# ', ''), baseFontSize + 4);
+      } else if (trimmed.startsWith('## ')) {
+        drawLine(margin, y, trimmed.replace('## ', ''), baseFontSize + 2);
+      } else if (trimmed.startsWith('### ')) {
+        drawLine(margin, y, trimmed.replace('### ', ''), baseFontSize + 1);
+      } else {
+        drawLine(margin, y, line, baseFontSize);
+      }
+    });
+
+    doc.save(filename);
+  };
+
+  // Parse **bold** inline markdown into an array of TextRun objects
+  const parseInlineRuns = (text: string) => {
+    const parts = text.split('**');
+    return parts.map((part, idx) => ({
+      text: part,
+      bold: idx % 2 === 1,
+    }));
+  };
+
+  const downloadAsDOCX = async (content: string, filename: string) => {
+    const lines = content.split('\n').map((line) => {
+      const trimmed = line.trim();
+
+      if (trimmed.startsWith('# ')) {
+        return new Paragraph({
+          heading: HeadingLevel.TITLE,
+          children: parseInlineRuns(trimmed.replace('# ', '')).map((r) =>
+            new TextRun({ text: r.text, bold: r.bold, size: 28 })
+          ),
+          spacing: { before: 0, after: 200 },
+        });
+      }
+      if (trimmed.startsWith('## ')) {
+        return new Paragraph({
+          heading: HeadingLevel.HEADING_2,
+          children: parseInlineRuns(trimmed.replace('## ', '')).map((r) =>
+            new TextRun({ text: r.text, bold: r.bold, size: 24 })
+          ),
+          spacing: { before: 200, after: 100 },
+        });
+      }
+      if (trimmed.startsWith('### ')) {
+        return new Paragraph({
+          heading: HeadingLevel.HEADING_3,
+          children: parseInlineRuns(trimmed.replace('### ', '')).map((r) =>
+            new TextRun({ text: r.text, bold: r.bold, size: 22 })
+          ),
+          spacing: { before: 100, after: 60 },
+        });
+      }
+      if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+        return new Paragraph({
+          children: parseInlineRuns(trimmed.replace(/^[-*]\s/, '• ')).map((r) =>
+            new TextRun({ text: r.text, bold: r.bold, size: 22 })
+          ),
+          bullet: { level: 0 },
+          spacing: { after: 40 },
+        });
+      }
+      // Table rows: | Col1 | Col2 |
+      if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+        const cells = trimmed
+          .slice(1, -1)
+          .split('|')
+          .map((c) => c.trim())
+          .filter((c) => c.length > 0);
+        if (cells.length > 0) {
+          const isHeader = cells.every((c) => c === c.toUpperCase() || c.includes('Category') || c.includes('Skills'));
+          return new Paragraph({
+            children: cells.map((cell) =>
+              new TextRun({
+                text: cell,
+                bold: isHeader,
+                size: 22,
+              })
+            ),
+            spacing: { after: 40 },
+            indent: { left: 360 },
+          });
+        }
+      }
+      return new Paragraph({
+        children: parseInlineRuns(trimmed).map((r) => new TextRun({ text: r.text, bold: r.bold, size: 22 })),
+        spacing: { after: 60 },
+        indent: { left: 360 },
+      });
+    });
+    const doc = new Document({
+      sections: [{ properties: {}, children: lines }],
+    });
+    const blob = await Packer.toBlob(doc);
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleDownloadResume = async (id: string) => {
+    try {
+      const response = await api.getResumeById(id);
+      const resume = response.resume;
+
+      // Prefer raw AI-generated content (full readable resume) over structured object
+      const content = resume.rawContent || buildResumeMarkdown(resume);
+
+      switch (downloadFormat) {
+        case 'pdf': {
+          downloadAsPDF(content, `resume-v${resume.version}.pdf`);
+          break;
+        }
+        case 'docx': {
+          await downloadAsDOCX(content, `resume-v${resume.version}.docx`);
+          break;
+        }
+        default: {
+          downloadFile(content, `resume-v${resume.version}.md`);
+          break;
+        }
+      }
+    } catch (err: any) {
+      alert(err.response?.data?.error || 'Failed to download resume');
+    }
+  };
+
+  const handleUploadResume = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setUploadingResume(true);
+    try {
+      const formData = new FormData();
+      formData.append('resume', file);
+
+      const response = await api.uploadResume(formData);
+      const extractedText = response.text || response.extractedText || '';
+      setBaseResumeText(extractedText);
+      alert('Resume uploaded successfully! AI will use it when generating your resume.');
+    } catch (err: any) {
+      alert(err.response?.data?.error || 'Failed to upload resume');
+    } finally {
+      setUploadingResume(false);
+      e.target.value = '';
+    }
   };
 
   if (loading) {
@@ -416,22 +590,66 @@ export function JobDetail() {
 
         {activeTab === 'resume' && (
           <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="text-lg font-semibold text-gray-900">Generated Resumes</h3>
-              <button
-                onClick={handleGenerateResume}
-                disabled={generating}
-                className="btn-primary btn-sm"
-              >
-                {generating ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <>
-                    <PenTool className="w-4 h-4 mr-2" />
-                    Generate Resume
-                  </>
-                )}
-              </button>
+            <div className="space-y-4">
+              {/* Upload your resume */}
+              <div className="card p-4 bg-blue-50 border-blue-100">
+                <div className="flex items-start gap-3">
+                  <Upload className="w-5 h-5 text-blue-600 mt-0.5" />
+                  <div>
+                    <h4 className="font-medium text-blue-900 mb-1">Use your own resume</h4>
+                    <p className="text-sm text-blue-700 mb-3">
+                      Upload your existing resume (PDF, DOCX, TXT) so AI can tailor it to this job.
+                    </p>
+                    <input
+                      type="file"
+                      accept=".pdf,.docx,.doc,.txt"
+                      onChange={handleUploadResume}
+                      disabled={uploadingResume}
+                      className="block w-full text-sm text-blue-600 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:bg-blue-100 file:text-blue-700 hover:file:bg-blue-200"
+                    />
+                    {baseResumeText && (
+                      <div className="mt-3 p-2 bg-blue-100 rounded text-xs text-blue-800">
+                        ✓ Resume loaded ({baseResumeText.length} characters)
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Header with download format + generate */}
+              <div className="flex items-center justify-between gap-4">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-gray-700">Download format:</span>
+                  {DOWNLOAD_FORMATS.map((fmt) => (
+                    <button
+                      key={fmt}
+                      onClick={() => setDownloadFormat(fmt)}
+                      className={clsx(
+                        'text-xs px-2 py-1 rounded border',
+                        downloadFormat === fmt
+                          ? 'bg-primary-600 text-white border-primary-600'
+                          : 'bg-white text-gray-600 border-gray-300 hover:border-gray-400'
+                      )}
+                    >
+                      {fmt.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  onClick={handleGenerateResume}
+                  disabled={generating}
+                  className="btn-primary btn-sm"
+                >
+                  {generating ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <>
+                      <PenTool className="w-4 h-4 mr-2" />
+                      Generate Resume
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
 
             {resumes.length === 0 ? (

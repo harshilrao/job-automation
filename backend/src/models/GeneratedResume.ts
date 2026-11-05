@@ -42,6 +42,7 @@ export interface IGeneratedResume extends Document {
   jobPostingId: Types.ObjectId;
   version: number;
   content: IResumeContent;
+  rawContent?: string;
   aiModel: string;
   aiProvider: string;
   atsScore?: number;
@@ -111,6 +112,7 @@ const generatedResumeSchema = new Schema<IGeneratedResume>({
   aiProvider: { type: String, required: true, trim: true },
   atsScore: { type: Number, min: 0, max: 100, index: true },
   atsAnalysis: { type: atsAnalysisSchema },
+  rawContent: { type: String, trim: true },
   pdfUrl: { type: String, trim: true },
   latexSource: { type: String },
   status: {
