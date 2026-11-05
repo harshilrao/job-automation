@@ -9,6 +9,85 @@ import { asyncHandler, createError } from '../middleware/errorHandler';
 import { AuthenticatedRequest } from '../middleware/auth';
 import { logger } from '../utils/logger';
 import mongoose from 'mongoose';
+import multer from 'multer';
+import mammoth from 'mammoth';
+import { UserProfile } from '../models/UserProfile';
+
+const pdfParse = require('pdf-parse');
+
+// Multer memory storage for resume upload parsing
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB max
+  fileFilter: (req: any, file: any, cb: any) => {
+    const allowed = ['.pdf', '.docx', '.doc', '.txt'];
+    const ext = file.originalname.toLowerCase().slice(file.originalname.lastIndexOf('.'));
+    if (allowed.includes(ext)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only PDF, DOCX, and TXT files are allowed'));
+    }
+  },
+}).single('resume');
+
+export const uploadResume = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+  const userId = req.user?.userId;
+  if (!userId) {
+    throw createError('Authentication required', 'AUTHENTICATION_ERROR', 401);
+  }
+
+  upload(req as any, res as any, async (err: any) => {
+    if (err) {
+      throw createError(err.message, 'VALIDATION_ERROR', 400);
+    }
+
+    const multerReq = req as any;
+    if (!multerReq.file) {
+      throw createError('No file uploaded', 'VALIDATION_ERROR', 400);
+    }
+
+    const { originalname, buffer, mimetype } = multerReq.file;
+    const ext = originalname.toLowerCase().slice(originalname.lastIndexOf('.'));
+
+    let extractedText = '';
+
+    try {
+      if (ext === '.pdf') {
+        const pdfData = await pdfParse(buffer);
+        extractedText = pdfData.text;
+      } else if (ext === '.docx' || ext === '.doc') {
+        const result = await mammoth.extractRawText({ buffer });
+        extractedText = result.value;
+      } else if (ext === '.txt') {
+        extractedText = buffer.toString('utf-8');
+      }
+    } catch (parseErr: any) {
+      logger.error('Resume parse error:', parseErr);
+      throw createError('Failed to parse resume file', 'VALIDATION_ERROR', 422);
+    }
+
+    if (!extractedText || extractedText.trim().length === 0) {
+      throw createError('No text could be extracted from the file', 'VALIDATION_ERROR', 422);
+    }
+
+    // Save extracted text to user profile
+    const profile = await UserProfile.findOne({ userId });
+    if (!profile) {
+      throw createError('User profile not found. Please complete your profile first.', 'NOT_FOUND', 404);
+    }
+
+    profile.baseResumeText = extractedText;
+    await profile.save();
+
+    logger.info('Resume uploaded', { userId, fileName: originalname, textLength: extractedText.length });
+
+    res.json({
+      message: 'Resume uploaded successfully',
+      text: extractedText,
+      textLength: extractedText.length,
+    });
+  });
+});
 
 export const applyToJob = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const userId = req.user?.userId;
@@ -235,10 +314,12 @@ export const generateResume = asyncHandler(async (req: AuthenticatedRequest, res
   console.log('[RESUME] User profile:', JSON.stringify(userProfile.toObject()).slice(0, 500));
   console.log('[RESUME] Job posting:', JSON.stringify(jobPosting.toObject()).slice(0, 500));
 
+  const baseResumeText = req.body.baseResumeText || userProfile.baseResumeText;
+
   const result = await aiResumeGenerator.generateResume(
     userProfile.toObject(),
     jobPosting.toObject(),
-    { tone, focusKeywords, model }
+    { tone, focusKeywords, model, baseResumeText }
   );
 
   console.log('[RESUME] Generation result:', {

@@ -28,6 +28,9 @@ router.post('/:id/withdraw', validate(schemas.idParam), applicationController.wi
 // Bulk operations
 router.post('/search-and-queue', applicationController.searchAndQueueJobs);
 
+// Resume upload
+router.post('/resume/upload', applicationController.uploadResume);
+
 // Resume generation
 router.post('/resume/generate', validate(schemas.generateResume), applicationController.generateResume);
 router.get('/resumes/:id', validate(schemas.idParam), applicationController.getResumeById);

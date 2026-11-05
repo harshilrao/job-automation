@@ -1,10 +1,14 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { MapPin, Clock, DollarSign, Building2, ExternalLink, Star, FileText, PenTool, Loader2, AlertCircle, CheckCircle, ArrowLeft, X } from 'lucide-react';
+import { MapPin, Clock, DollarSign, Building2, ExternalLink, Star, FileText, PenTool, Loader2, AlertCircle, CheckCircle, ArrowLeft, X, Upload } from 'lucide-react';
 import { api } from '../services/api';
 import { JobPosting, GeneratedResume, CoverLetter } from '@shared/types';
 import { formatDistanceToNow } from 'date-fns';
 import { clsx } from 'clsx';
+import jsPDF from 'jspdf';
+import { Document, Packer, Paragraph, TextRun } from 'docx';
+
+const DOWNLOAD_FORMATS: ('markdown' | 'pdf' | 'docx')[] = ['markdown', 'pdf', 'docx'];
 
 export function JobDetail() {
   const { id } = useParams<{ id: string }>();
@@ -23,6 +27,9 @@ export function JobDetail() {
     title: string;
     content: string;
   } | null>(null);
+  const [downloadFormat, setDownloadFormat] = useState<'markdown' | 'pdf' | 'docx'>('markdown');
+  const [uploadingResume, setUploadingResume] = useState(false);
+  const [baseResumeText, setBaseResumeText] = useState<string>('');
 
   useEffect(() => {
     if (id) {
@@ -113,6 +120,7 @@ export function JobDetail() {
       await api.generateResume({
         jobPostingId: job._id,
         tone: 'professional',
+        baseResumeText: baseResumeText || undefined,
       });
       loadResumes();
     } catch (err: any) {
@@ -134,17 +142,6 @@ export function JobDetail() {
       });
     } catch (err: any) {
       alert(err.response?.data?.error || 'Failed to load resume');
-    }
-  };
-
-  const handleDownloadResume = async (id: string) => {
-    try {
-      const response = await api.getResumeById(id);
-      const resume = response.resume;
-      const markdown = buildResumeMarkdown(resume);
-      downloadFile(markdown, `resume-v${resume.version}.md`);
-    } catch (err: any) {
-      alert(err.response?.data?.error || 'Failed to download resume');
     }
   };
 
@@ -214,6 +211,79 @@ export function JobDetail() {
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
+  };
+
+  const downloadAsPDF = (content: string, filename: string) => {
+    const doc = new jsPDF();
+    const lines = doc.splitTextToSize(content, 180);
+    doc.text(lines, 20, 20);
+    doc.save(filename);
+  };
+
+  const downloadAsDOCX = async (content: string, filename: string) => {
+    const lines = content.split('\n').map(line =>
+      new Paragraph({ children: [new TextRun({ text: line, size: 22 })] })
+    );
+    const doc = new Document({
+      sections: [{ properties: {}, children: lines }],
+    });
+    const blob = await Packer.toBlob(doc);
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleDownloadResume = async (id: string) => {
+    try {
+      const response = await api.getResumeById(id);
+      const resume = response.resume;
+
+      switch (downloadFormat) {
+        case 'pdf': {
+          const markdown = buildResumeMarkdown(resume);
+          downloadAsPDF(markdown, `resume-v${resume.version}.pdf`);
+          break;
+        }
+        case 'docx': {
+          const markdown = buildResumeMarkdown(resume);
+          await downloadAsDOCX(markdown, `resume-v${resume.version}.docx`);
+          break;
+        }
+        default: {
+          const markdown = buildResumeMarkdown(resume);
+          downloadFile(markdown, `resume-v${resume.version}.md`);
+          break;
+        }
+      }
+    } catch (err: any) {
+      alert(err.response?.data?.error || 'Failed to download resume');
+    }
+  };
+
+  const handleUploadResume = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setUploadingResume(true);
+    try {
+      const formData = new FormData();
+      formData.append('resume', file);
+
+      const response = await api.uploadResume(formData);
+      const extractedText = response.text || response.extractedText || '';
+      setBaseResumeText(extractedText);
+      alert('Resume uploaded successfully! AI will use it when generating your resume.');
+    } catch (err: any) {
+      alert(err.response?.data?.error || 'Failed to upload resume');
+    } finally {
+      setUploadingResume(false);
+      e.target.value = '';
+    }
   };
 
   if (loading) {
@@ -416,22 +486,66 @@ export function JobDetail() {
 
         {activeTab === 'resume' && (
           <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="text-lg font-semibold text-gray-900">Generated Resumes</h3>
-              <button
-                onClick={handleGenerateResume}
-                disabled={generating}
-                className="btn-primary btn-sm"
-              >
-                {generating ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <>
-                    <PenTool className="w-4 h-4 mr-2" />
-                    Generate Resume
-                  </>
-                )}
-              </button>
+            <div className="space-y-4">
+              {/* Upload your resume */}
+              <div className="card p-4 bg-blue-50 border-blue-100">
+                <div className="flex items-start gap-3">
+                  <Upload className="w-5 h-5 text-blue-600 mt-0.5" />
+                  <div>
+                    <h4 className="font-medium text-blue-900 mb-1">Use your own resume</h4>
+                    <p className="text-sm text-blue-700 mb-3">
+                      Upload your existing resume (PDF, DOCX, TXT) so AI can tailor it to this job.
+                    </p>
+                    <input
+                      type="file"
+                      accept=".pdf,.docx,.doc,.txt"
+                      onChange={handleUploadResume}
+                      disabled={uploadingResume}
+                      className="block w-full text-sm text-blue-600 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:bg-blue-100 file:text-blue-700 hover:file:bg-blue-200"
+                    />
+                    {baseResumeText && (
+                      <div className="mt-3 p-2 bg-blue-100 rounded text-xs text-blue-800">
+                        ✓ Resume loaded ({baseResumeText.length} characters)
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Header with download format + generate */}
+              <div className="flex items-center justify-between gap-4">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-gray-700">Download format:</span>
+                  {DOWNLOAD_FORMATS.map((fmt) => (
+                    <button
+                      key={fmt}
+                      onClick={() => setDownloadFormat(fmt)}
+                      className={clsx(
+                        'text-xs px-2 py-1 rounded border',
+                        downloadFormat === fmt
+                          ? 'bg-primary-600 text-white border-primary-600'
+                          : 'bg-white text-gray-600 border-gray-300 hover:border-gray-400'
+                      )}
+                    >
+                      {fmt.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  onClick={handleGenerateResume}
+                  disabled={generating}
+                  className="btn-primary btn-sm"
+                >
+                  {generating ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <>
+                      <PenTool className="w-4 h-4 mr-2" />
+                      Generate Resume
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
 
             {resumes.length === 0 ? (

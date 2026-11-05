@@ -69,6 +69,7 @@ export interface IUserProfile extends Document {
   userId: string;
   personalInfo: IPersonalInfo;
   professionalSummary: string;
+  baseResumeText?: string;
   skills: ISkills;
   experience: IExperience[];
   education: IEducation[];
