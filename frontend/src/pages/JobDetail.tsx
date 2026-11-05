@@ -138,7 +138,7 @@ export function JobDetail() {
         type: 'resume',
         id,
         title: `Resume v${resume.version}`,
-        content: JSON.stringify(resume.content, null, 2),
+        content: resume.rawContent || JSON.stringify(resume.content, null, 2),
       });
     } catch (err: any) {
       alert(err.response?.data?.error || 'Failed to load resume');

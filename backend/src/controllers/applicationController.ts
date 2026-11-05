@@ -351,6 +351,7 @@ export const generateResume = asyncHandler(async (req: AuthenticatedRequest, res
 
   generatedResume.atsScore = result.atsAnalysis.score;
   generatedResume.atsAnalysis = result.atsAnalysis;
+  generatedResume.rawContent = result.content;
   generatedResume.status = 'draft';
   await generatedResume.save();
 
