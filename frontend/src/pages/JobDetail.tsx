@@ -6,7 +6,7 @@ import { JobPosting, GeneratedResume, CoverLetter } from '@shared/types';
 import { formatDistanceToNow } from 'date-fns';
 import { clsx } from 'clsx';
 import jsPDF from 'jspdf';
-import { Document, Packer, Paragraph, TextRun } from 'docx';
+import { Document, Packer, Paragraph, TextRun, HeadingLevel } from 'docx';
 
 const DOWNLOAD_FORMATS: ('markdown' | 'pdf' | 'docx')[] = ['markdown', 'pdf', 'docx'];
 
@@ -214,15 +214,66 @@ export function JobDetail() {
 
   const downloadAsPDF = (content: string, filename: string) => {
     const doc = new jsPDF();
-    const lines = doc.splitTextToSize(content, 180);
-    doc.text(lines, 20, 20);
+    const pageWidth = doc.internal.pageSize.width || 210;
+    const pageHeight = doc.internal.pageSize.height || 297;
+    const margin = 15;
+    const fontSize = 10;
+    const lineHeight = fontSize * 1.5; // ~15mm per line
+    const linesPerPage = Math.floor((pageHeight - margin * 2) / lineHeight);
+
+    doc.setFontSize(fontSize);
+
+    const lines = doc.splitTextToSize(content, pageWidth - margin * 2);
+
+    lines.forEach((line: string, index: number) => {
+      if (index > 0 && index % linesPerPage === 0) {
+        doc.addPage();
+      }
+      const pageIndex = index % linesPerPage;
+      const y = margin + pageIndex * lineHeight;
+      doc.text(line, margin, y);
+    });
+
     doc.save(filename);
   };
 
   const downloadAsDOCX = async (content: string, filename: string) => {
-    const lines = content.split('\n').map(line =>
-      new Paragraph({ children: [new TextRun({ text: line, size: 22 })] })
-    );
+    const lines = content.split('\n').map((line) => {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('## ')) {
+        return new Paragraph({
+          heading: HeadingLevel.HEADING_2,
+          children: [new TextRun({ text: trimmed.replace('## ', ''), bold: true, size: 24 })],
+          spacing: { before: 200, after: 100 },
+        });
+      }
+      if (trimmed.startsWith('### ')) {
+        return new Paragraph({
+          heading: HeadingLevel.HEADING_3,
+          children: [new TextRun({ text: trimmed.replace('### ', ''), bold: true, size: 22 })],
+          spacing: { before: 100, after: 60 },
+        });
+      }
+      if (trimmed.startsWith('# ')) {
+        return new Paragraph({
+          heading: HeadingLevel.TITLE,
+          children: [new TextRun({ text: trimmed.replace('# ', ''), bold: true, size: 28 })],
+          spacing: { before: 0, after: 200 },
+        });
+      }
+      if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+        return new Paragraph({
+          children: [new TextRun({ text: trimmed.replace(/^[-*]\s/, '• '), size: 22 })],
+          bullet: { level: 0 },
+          spacing: { after: 40 },
+        });
+      }
+      return new Paragraph({
+        children: [new TextRun({ text: trimmed, size: 22 })],
+        spacing: { after: 60 },
+        indent: { left: 360 },
+      });
+    });
     const doc = new Document({
       sections: [{ properties: {}, children: lines }],
     });
