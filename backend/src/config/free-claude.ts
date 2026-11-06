@@ -260,10 +260,11 @@ class FreeClaudeClient {
       tone?: 'professional' | 'enthusiastic' | 'concise' | 'storytelling';
       focusKeywords?: string[];
       model?: string;
+      baseResumeText?: string;
     } = {}
   ): Promise<string> {
     const systemPrompt = this.buildResumeSystemPrompt(options.tone || 'professional');
-    const userPrompt = this.buildResumeUserPrompt(jobDescription, userProfile, options.focusKeywords);
+    const userPrompt = this.buildResumeUserPrompt(jobDescription, userProfile, options.focusKeywords, options.baseResumeText);
 
     const response = await this.chatCompletion({
       model: options.model || this.defaultModel,
@@ -359,48 +360,144 @@ class FreeClaudeClient {
       storytelling: 'Use narrative format. Connect experiences to the role through stories.',
     };
 
-    return `You are an expert resume writer and ATS optimization specialist. Create a tailored, ATS-friendly resume that matches the job description perfectly.
+    return `You are an expert resume writer. Create a tailored, ATS-friendly resume that PRESERVES the candidate's uploaded resume structure exactly.
 
-${toneInstructions[tone as keyof typeof toneInstructions] || toneInstructions.professional}
+PRESERVE THE ORIGINAL RESUME STRUCTURE EXACTLY:
+- Use the EXACT same section headings as the uploaded resume. Do NOT rename sections (e.g., do not change "Experience" to "PROFESSIONAL EXPERIENCE").
+- Keep the EXACT same section order as the uploaded resume. Do NOT reorder sections.
+- Do NOT add new sections that were not in the original.
+- Do NOT remove sections that were in the original.
+- Keep the same visual density and section grouping as the original.
+- Maintain 1-2 pages maximum.
 
-Guidelines:
-1. Extract keywords from the job description and naturally incorporate them
-2. Quantify achievements with numbers, percentages, and metrics
-3. Use standard resume sections: Professional Summary, Skills, Experience, Education, Projects
-4. Format for ATS parsing: standard headers, no columns, no graphics, simple formatting
-5. Match the required skills and experience level from the job description
-6. Highlight relevant technologies and methodologies mentioned in the job
-7. Keep it to 1-2 pages maximum
-8. Use action verbs and industry-standard terminology
-9. Ensure no invented facts - only use information from the user profile
-10. Optimize for both human readers and ATS algorithms
+TAILORING RULES (only change wording inside existing sections, never structure):
+- Rewrite the professional summary to target the specific job, using verified skills from the resume.
+- Rewrite experience bullets to be achievement-oriented and keyword-aligned with the job description.
+- Reorder/prioritize skills within the skills section to emphasize those mentioned in the job description.
+- Keep all actual facts unchanged: company names, job titles, employment dates, education, skills.
+- Use information from the user profile and uploaded resume only. Do NOT invent facts, companies, or metrics.
+- Include numerical results only when provided by the candidate. Never fabricate metrics.
 
-Return the resume in a structured format that can be converted to PDF.`;
+STRICT RULES:
+1. NO spacing artifacts. Use normal spaces only.
+2. Use normal date format: Month Year (e.g., Aug 2021 to Dec 2023).
+3. Keep to 1-2 pages maximum.
+4. Tone: ${toneInstructions[tone as keyof typeof toneInstructions] || toneInstructions.professional}
+5. Optimize for both human readers and ATS algorithms.
+6. Do NOT include a "KEYWORDS FOR ATS" section or any raw keyword list in the resume output.
+
+Return ONLY the resume content in plain text, using the exact same section headings and order as the uploaded resume.`;
   }
 
   private buildResumeUserPrompt(
     jobDescription: string,
     userProfile: any,
-    focusKeywords?: string[]
+    focusKeywords?: string[],
+    baseResumeText?: string
   ): string {
+    const profileSummary = baseResumeText
+      ? `UPLOADED RESUME (PRESERVE THIS STRUCTURE - this is the candidate's original resume format, fonts, and layout):
+${baseResumeText}`
+      : this.buildProfileSummary(userProfile);
+
+    const focusKeywordsLine = focusKeywords && focusKeywords.length > 0
+      ? `Focus Keywords to Emphasize: ${focusKeywords.join(', ')}\n\n`
+      : '';
+
+    const criticalInstruction = baseResumeText
+      ? 'PRESERVE the uploaded resume\'s exact section headings and section order. Do NOT rename sections, do NOT reorder sections, do NOT add or remove sections.'
+      : 'CREATE a professional resume from scratch using the candidate profile above. Include all relevant sections: header with contact info, professional summary, technical skills, professional experience, education, and projects.';
+
     return `Job Description:
 ${jobDescription}
 
-User Profile:
-${JSON.stringify(userProfile, null, 2)}
+Candidate Profile:
+${profileSummary}
 
-${focusKeywords && focusKeywords.length > 0 ? `Focus Keywords to Emphasize: ${focusKeywords.join(', ')}` : ''}
+${focusKeywordsLine}Create a tailored, ATS-optimized resume for this specific job using the STRICT RULES from the system instructions.
 
-Create a tailored, ATS-optimized resume for this specific job. Return the resume content in a structured format with these sections:
-1. Professional Summary (2-3 sentences)
-2. Technical Skills (categorized)
-3. Soft Skills
-4. Professional Experience (reverse chronological, with tailored bullets)
-5. Education
-6. Projects (relevant to the role)
-7. Keywords (extracted from job description for ATS)
+CRITICAL: ${criticalInstruction} Only tailor the wording inside each section to match the job requirements while staying truthful to the user's actual experience. Follow the no-spacing-artifact rules and Month Year date format strictly.
 
-Focus on matching the job requirements while staying truthful to the user's actual experience.`;
+IMPORTANT: Do NOT include a "KEYWORDS FOR ATS" section or any raw keyword list in the resume output. Keywords are used internally for ATS optimization only and must not appear as a section on the resume.`;
+  }
+
+  private buildProfileSummary(userProfile: any): string {
+    const pi = userProfile?.personalInfo || {};
+    const name = `${pi.firstName || ''} ${pi.lastName || ''}`.trim() || 'Candidate';
+    const contact = [
+      pi.address?.city && pi.address?.province ? `${pi.address.city}, ${pi.address.province}` : '',
+      pi.phone,
+      pi.email,
+      pi.linkedinUrl,
+      pi.githubUrl,
+      pi.portfolioUrl,
+    ].filter(Boolean).join(' • ');
+
+    const lines: string[] = [
+      `NAME: ${name}`,
+      contact ? `CONTACT: ${contact}` : '',
+      '',
+    ];
+
+    if (userProfile?.professionalSummary) {
+      lines.push(`PROFESSIONAL SUMMARY:\n${userProfile.professionalSummary}`);
+      lines.push('');
+    }
+
+    const skills = userProfile?.skills;
+    if (skills) {
+      const skillParts: string[] = [];
+      if (skills.technical?.length) skillParts.push(`Technical: ${skills.technical.join(', ')}`);
+      if (skills.soft?.length) skillParts.push(`Soft Skills: ${skills.soft.join(', ')}`);
+      if (skills.languages?.length) skillParts.push(`Languages: ${skills.languages.join(', ')}`);
+      if (skills.certifications?.length) skillParts.push(`Certifications: ${skills.certifications.join(', ')}`);
+      if (skillParts.length) {
+        lines.push(`TECHNICAL SKILLS:\n${skillParts.join('\n')}`);
+        lines.push('');
+      }
+    }
+
+    if (userProfile?.experience?.length) {
+      lines.push('PROFESSIONAL EXPERIENCE:');
+      for (const exp of userProfile.experience) {
+        const start = exp.startDate ? new Date(exp.startDate).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '';
+        const end = exp.current ? 'Present' : exp.endDate ? new Date(exp.endDate).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '';
+        const dateRange = start && end ? `${start} to ${end}` : start || end;
+        lines.push(`\n${exp.position} at ${exp.company}${exp.location ? ` (${exp.location})` : ''}`);
+        if (dateRange) lines.push(`  ${dateRange}`);
+        if (exp.description?.length) {
+          for (const d of exp.description) lines.push(`  • ${d}`);
+        }
+        if (exp.technologies?.length) lines.push(`  Technologies: ${exp.technologies.join(', ')}`);
+      }
+      lines.push('');
+    }
+
+    if (userProfile?.education?.length) {
+      lines.push('EDUCATION:');
+      for (const edu of userProfile.education) {
+        const start = edu.startDate ? new Date(edu.startDate).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '';
+        const end = edu.endDate ? new Date(edu.endDate).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '';
+        const dateRange = start && end ? `${start} to ${end}` : start || end;
+        lines.push(`\n${edu.degree} in ${edu.fieldOfStudy}`);
+        lines.push(`  ${edu.institution}${dateRange ? ` (${dateRange})` : ''}`);
+        if (edu.gpa) lines.push(`  GPA: ${edu.gpa}`);
+        if (edu.honors?.length) lines.push(`  Honors: ${edu.honors.join(', ')}`);
+      }
+      lines.push('');
+    }
+
+    if (userProfile?.projects?.length) {
+      lines.push('PROJECTS:');
+      for (const proj of userProfile.projects) {
+        lines.push(`\n${proj.name}`);
+        if (proj.description) lines.push(`  ${proj.description}`);
+        if (proj.technologies?.length) lines.push(`  Technologies: ${proj.technologies.join(', ')}`);
+      }
+      lines.push('');
+    }
+
+    return lines.join('\n').trim();
   }
 
   private buildCoverLetterSystemPrompt(tone: string): string {
