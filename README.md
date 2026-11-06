@@ -467,5 +467,4 @@ For issues and feature requests, please open a GitHub issue.
 
 ---
 
-**Built with ❤️ for Ontario job seekers**#   j o b - a u t o m a t i o n  
- 
+**Built with ❤️ for Ontario job seekers**
