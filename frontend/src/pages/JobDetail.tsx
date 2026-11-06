@@ -216,121 +216,226 @@ export function JobDetail() {
     const doc = new jsPDF();
     const pageWidth = doc.internal.pageSize.width || 210;
     const pageHeight = doc.internal.pageSize.height || 297;
-    const margin = 15;
-    const baseFontSize = 10;
-    const lineHeight = baseFontSize * 1.5;
-    const linesPerPage = Math.floor((pageHeight - margin * 2) / lineHeight);
+    const margin = 16;
+    const usableWidth = pageWidth - margin * 2;
 
-    // Parse a line with **bold** inline markup into segments for jsPDF
-    const drawLine = (x: number, y: number, line: string, fontSize: number) => {
-      doc.setFontSize(fontSize);
-      doc.text(line, x, y);
+    doc.setFont('helvetica');
+
+    const FONT = {
+      h1: { size: 16, lineHeight: 1.3, after: 8 },
+      h2: { size: 13, lineHeight: 1.3, after: 6 },
+      h3: { size: 11.5, lineHeight: 1.3, after: 5 },
+      body: { size: 10, lineHeight: 1.5, after: 5 },
+    } as const;
+
+    let y = margin;
+
+    const needsPage = (height: number) => {
+      if (y + height > pageHeight - margin) {
+        doc.addPage();
+        y = margin;
+      }
     };
 
-    const lines = doc.splitTextToSize(content, pageWidth - margin * 2);
+    const parseRuns = (text: string) =>
+      text.split('**').map((part, i) => ({ text: part, bold: i % 2 === 1 }));
 
-    lines.forEach((line: string, index: number) => {
-      if (index > 0 && index % linesPerPage === 0) {
-        doc.addPage();
-      }
-      const pageIndex = index % linesPerPage;
-      const y = margin + pageIndex * lineHeight;
+    const drawRuns = (x: number, yy: number, runs: { text: string; bold: boolean }[], size: number) => {
+      let cx = x;
+      doc.setFontSize(size);
+      runs.forEach((r) => {
+        doc.setFont('helvetica', r.bold ? 'bold' : 'normal');
+        doc.text(r.text, cx, yy);
+        cx += doc.getTextWidth(r.text);
+      });
+    };
 
-      const trimmed = line.trim();
-      if (trimmed.startsWith('# ')) {
-        drawLine(margin, y, trimmed.replace('# ', ''), baseFontSize + 4);
-      } else if (trimmed.startsWith('## ')) {
-        drawLine(margin, y, trimmed.replace('## ', ''), baseFontSize + 2);
-      } else if (trimmed.startsWith('### ')) {
-        drawLine(margin, y, trimmed.replace('### ', ''), baseFontSize + 1);
+    const renderBlock = (text: string, kind: keyof typeof FONT) => {
+      const { size, lineHeight: lh, after } = FONT[kind];
+      const lineHeight = size * lh;
+
+      doc.setFontSize(size);
+      const wrapped = (doc.splitTextToSize(text, usableWidth) || []) as string[];
+
+      needsPage(lineHeight + after);
+
+      wrapped.forEach((line, i) => {
+        if (i > 0) {
+          needsPage(lineHeight);
+          y += lineHeight;
+        }
+        const runs = parseRuns(line);
+        drawRuns(margin, y, runs, size);
+        y += lineHeight;
+      });
+
+      y += after;
+    };
+
+    // Split into paragraphs on blank lines so spacing is preserved
+    const paragraphs = content.split(/\n\s*\n/);
+
+    paragraphs.forEach((para, idx) => {
+      const trimmed = para.trim();
+      if (!trimmed) return;
+
+      const lines = trimmed.split('\n');
+      const first = lines[0].trim();
+
+      if (first.startsWith('# ')) {
+        renderBlock(first.replace(/^#\s*/, ''), 'h1');
+      } else if (first.startsWith('## ')) {
+        renderBlock(first.replace(/^##\s*/, ''), 'h2');
+      } else if (first.startsWith('### ')) {
+        renderBlock(first.replace(/^###\s*/, ''), 'h3');
       } else {
-        drawLine(margin, y, line, baseFontSize);
+        const bodyText = lines.map((l) => l.trim()).join(' ');
+        renderBlock(bodyText, 'body');
+      }
+
+      // small gap between paragraphs
+      if (idx < paragraphs.length - 1) {
+        y += 3;
+        needsPage(0);
       }
     });
 
     doc.save(filename);
   };
 
-  // Parse **bold** inline markdown into an array of TextRun objects
-  const parseInlineRuns = (text: string) => {
-    const parts = text.split('**');
-    return parts.map((part, idx) => ({
-      text: part,
-      bold: idx % 2 === 1,
-    }));
-  };
-
   const downloadAsDOCX = async (content: string, filename: string) => {
-    const lines = content.split('\n').map((line) => {
-      const trimmed = line.trim();
+    // Sizes in half-points (docx unit): 22 = 11pt
+    const SIZE = {
+      title: 28, // 14pt
+      h1: 26, // 13pt
+      h2: 24, // 12pt
+      h3: 22, // 11pt
+      body: 22, // 11pt
+      bullet: 22, // 11pt
+    } as const;
 
-      if (trimmed.startsWith('# ')) {
-        return new Paragraph({
-          heading: HeadingLevel.TITLE,
-          children: parseInlineRuns(trimmed.replace('# ', '')).map((r) =>
-            new TextRun({ text: r.text, bold: r.bold, size: 28 })
-          ),
-          spacing: { before: 0, after: 200 },
+    const SPACING = {
+      title: { before: 0, after: 200, line: 340, lineRule: 'auto' as const },
+      h1: { before: 140, after: 100, line: 300, lineRule: 'auto' as const },
+      h2: { before: 120, after: 80, line: 300, lineRule: 'auto' as const },
+      h3: { before: 100, after: 60, line: 300, lineRule: 'auto' as const },
+      body: { before: 0, after: 100, line: 330, lineRule: 'auto' as const },
+      bullet: { before: 0, after: 50, line: 300, lineRule: 'auto' as const },
+    } as const;
+
+    const parseRuns = (text: string) =>
+      text.split('**').map((part, i) => ({ text: part, bold: i % 2 === 1 }));
+
+    const makeRuns = (t: string, size: number) =>
+      parseRuns(t).map((r) => new TextRun({ text: r.text, bold: r.bold, size, font: 'Calibri' }));
+
+    // Split into paragraphs on blank lines so spacing is preserved
+    const blocks = content.split(/\n\s*\n/);
+
+    const children: any[] = [];
+
+    blocks.forEach((block) => {
+      const trimmed = block.trim();
+      if (!trimmed) return;
+
+      const lines = trimmed.split('\n');
+      const first = lines[0].trim();
+
+      if (first.startsWith('# ')) {
+        children.push(
+          new Paragraph({
+            heading: HeadingLevel.TITLE,
+            children: makeRuns(first.replace(/^#\s*/, ''), SIZE.title),
+            spacing: SPACING.title,
+          })
+        );
+      } else if (first.startsWith('## ')) {
+        children.push(
+          new Paragraph({
+            heading: HeadingLevel.HEADING_1,
+            children: makeRuns(first.replace(/^##\s*/, ''), SIZE.h1),
+            spacing: SPACING.h1,
+          })
+        );
+      } else if (first.startsWith('### ')) {
+        children.push(
+          new Paragraph({
+            heading: HeadingLevel.HEADING_2,
+            children: makeRuns(first.replace(/^###\s*/, ''), SIZE.h2),
+            spacing: SPACING.h2,
+          })
+        );
+      } else if (first.startsWith('#### ')) {
+        children.push(
+          new Paragraph({
+            heading: HeadingLevel.HEADING_3,
+            children: makeRuns(first.replace(/^####\s*/, ''), SIZE.h3),
+            spacing: SPACING.h3,
+          })
+        );
+      } else if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+        // Bullets: each line becomes its own bullet paragraph
+        lines.forEach((line) => {
+          const t = line.trim();
+          if (!t) return;
+          children.push(
+            new Paragraph({
+              children: makeRuns(t.replace(/^[-*]\s/, '• '), SIZE.bullet),
+              bullet: { level: 0 },
+              spacing: SPACING.bullet,
+              indent: { left: 360 },
+            })
+          );
         });
-      }
-      if (trimmed.startsWith('## ')) {
-        return new Paragraph({
-          heading: HeadingLevel.HEADING_2,
-          children: parseInlineRuns(trimmed.replace('## ', '')).map((r) =>
-            new TextRun({ text: r.text, bold: r.bold, size: 24 })
-          ),
-          spacing: { before: 200, after: 100 },
-        });
-      }
-      if (trimmed.startsWith('### ')) {
-        return new Paragraph({
-          heading: HeadingLevel.HEADING_3,
-          children: parseInlineRuns(trimmed.replace('### ', '')).map((r) =>
-            new TextRun({ text: r.text, bold: r.bold, size: 22 })
-          ),
-          spacing: { before: 100, after: 60 },
-        });
-      }
-      if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
-        return new Paragraph({
-          children: parseInlineRuns(trimmed.replace(/^[-*]\s/, '• ')).map((r) =>
-            new TextRun({ text: r.text, bold: r.bold, size: 22 })
-          ),
-          bullet: { level: 0 },
-          spacing: { after: 40 },
-        });
-      }
-      // Table rows: | Col1 | Col2 |
-      if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+      } else if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+        // Table row: render cells separated, header row bold
         const cells = trimmed
           .slice(1, -1)
           .split('|')
           .map((c) => c.trim())
           .filter((c) => c.length > 0);
         if (cells.length > 0) {
-          const isHeader = cells.every((c) => c === c.toUpperCase() || c.includes('Category') || c.includes('Skills'));
-          return new Paragraph({
-            children: cells.map((cell) =>
-              new TextRun({
-                text: cell,
-                bold: isHeader,
-                size: 22,
-              })
-            ),
-            spacing: { after: 40 },
-            indent: { left: 360 },
-          });
+          const isHeader = cells.every((c) => c === c.toUpperCase());
+          children.push(
+            new Paragraph({
+              children: cells.map((cell, i) =>
+                new TextRun({
+                  text: cell + (i < cells.length - 1 ? '   |   ' : ''),
+                  bold: isHeader,
+                  size: SIZE.body,
+                  font: 'Calibri',
+                })
+              ),
+              spacing: SPACING.body,
+              indent: { left: 360 },
+            })
+          );
         }
+      } else {
+        // Body paragraph: join wrapped lines with a space
+        const bodyText = lines.map((l) => l.trim()).filter(Boolean).join(' ');
+        children.push(
+          new Paragraph({
+            children: makeRuns(bodyText, SIZE.body),
+            spacing: SPACING.body,
+          })
+        );
       }
-      return new Paragraph({
-        children: parseInlineRuns(trimmed).map((r) => new TextRun({ text: r.text, bold: r.bold, size: 22 })),
-        spacing: { after: 60 },
-        indent: { left: 360 },
-      });
     });
+
     const doc = new Document({
-      sections: [{ properties: {}, children: lines }],
+      sections: [
+        {
+          properties: {
+            page: {
+              margin: { top: 1440, bottom: 1440, left: 1440, right: 1440 }, // 1 inch
+            },
+          },
+          children,
+        },
+      ],
     });
+
     const blob = await Packer.toBlob(doc);
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
