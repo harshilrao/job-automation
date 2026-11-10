@@ -449,10 +449,6 @@ npx playwright install-deps
 4. Push to branch: `git push origin feature/amazing-feature`
 5. Open Pull Request
 
-## 📝 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
 ## 🙏 Acknowledgments
 
 - [jobspy-node](https://github.com/DaKheera47/jobspy-node) - Job scraping library
@@ -467,4 +463,4 @@ For issues and feature requests, please open a GitHub issue.
 
 ---
 
-**Built with ❤️ for Ontario job seekers**
+**Built for Ontario job seekers**
