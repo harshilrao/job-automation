@@ -30,6 +30,12 @@ export function JobDetail() {
   const [downloadFormat, setDownloadFormat] = useState<'markdown' | 'pdf' | 'docx'>('markdown');
   const [uploadingResume, setUploadingResume] = useState(false);
   const [baseResumeText, setBaseResumeText] = useState<string>('');
+  const [resumeTone, setResumeTone] = useState<'professional' | 'enthusiastic' | 'concise' | 'storytelling'>('professional');
+  const [coverLetterTone, setCoverLetterTone] = useState<'professional' | 'enthusiastic' | 'concise' | 'storytelling'>('professional');
+  const [generatingCoverLetter, setGeneratingCoverLetter] = useState(false);
+  const [selectedResumeForCoverLetter, setSelectedResumeForCoverLetter] = useState<string>('');
+  const [selectedResumeId, setSelectedResumeId] = useState<string>('');
+  const [selectedCoverLetterId, setSelectedCoverLetterId] = useState<string>('');
 
   useEffect(() => {
     if (id) {
@@ -119,7 +125,7 @@ export function JobDetail() {
     try {
       await api.generateResume({
         jobPostingId: job._id,
-        tone: 'professional',
+        tone: resumeTone,
         baseResumeText: baseResumeText || undefined,
       });
       loadResumes();
@@ -127,6 +133,27 @@ export function JobDetail() {
       alert(err.response?.data?.error || 'Failed to generate resume');
     } finally {
       setGenerating(false);
+    }
+  };
+
+  const handleGenerateCoverLetter = async () => {
+    if (!job) return;
+    if (!selectedResumeForCoverLetter) {
+      alert('Please select a resume to generate a cover letter from.');
+      return;
+    }
+    setGeneratingCoverLetter(true);
+    try {
+      await api.generateCoverLetter({
+        jobPostingId: job._id,
+        resumeId: selectedResumeForCoverLetter,
+        tone: coverLetterTone,
+      });
+      loadResumes();
+    } catch (err: any) {
+      alert(err.response?.data?.error || 'Failed to generate cover letter');
+    } finally {
+      setGeneratingCoverLetter(false);
     }
   };
 
@@ -806,6 +833,50 @@ export function JobDetail() {
         {activeTab === 'cover-letter' && (
           <div className="space-y-4">
             <h3 className="text-lg font-semibold text-gray-900">Cover Letters</h3>
+            {resumes.length === 0 ? (
+              <div className="text-center py-6 text-gray-500">
+                <p>No resumes yet. Generate a resume first, then create a cover letter.</p>
+              </div>
+            ) : (
+              <div className="card p-4 space-y-4 bg-amber-50 border-amber-200">
+                <h4 className="font-medium text-amber-900 mb-2">Generate Cover Letter</h4>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+                  <select
+                    value={selectedResumeForCoverLetter}
+                    onChange={(e) => setSelectedResumeForCoverLetter(e.target.value)}
+                    className="input"
+                  >
+                    <option value="">Select a resume...</option>
+                    {resumes.map((r) => (
+                      <option key={r._id} value={r._id}>
+                        v{r.version} ({r.aiModel}) {r.atsScore !== undefined ? ` - ATS: ${r.atsScore}%` : ''}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    value={coverLetterTone}
+                    onChange={(e) => setCoverLetterTone(e.target.value)}
+                    className="input"
+                  >
+                    <option value="professional">Professional</option>
+                    <option value="enthusiastic">Enthusiastic</option>
+                    <option value="concise">Concise</option>
+                    <option value="storytelling">Storytelling</option>
+                  </select>
+                  <button
+                    onClick={handleGenerateCoverLetter}
+                    disabled={generatingCoverLetter || !selectedResumeForCoverLetter}
+                    className="btn-primary"
+                  >
+                    {generatingCoverLetter ? (
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    ) : (
+                      'Generate'
+                    )}
+                  </button>
+                </div>
+              </div>
+            )}
             {coverLetters.length === 0 ? (
               <div className="text-center py-12">
                 <FileText className="w-12 h-12 text-gray-300 mx-auto mb-4" />
@@ -848,7 +919,11 @@ export function JobDetail() {
             <div className="card p-6 space-y-4">
               <div>
                 <h4 className="font-medium text-gray-900 mb-2">Select Resume</h4>
-                <select className="input">
+                <select
+                  value={selectedResumeId}
+                  onChange={(e) => setSelectedResumeId(e.target.value)}
+                  className="input"
+                >
                   <option value="">Choose a resume...</option>
                   {resumes.map((r) => (
                     <option key={r._id} value={r._id}>
@@ -859,7 +934,11 @@ export function JobDetail() {
               </div>
               <div>
                 <h4 className="font-medium text-gray-900 mb-2">Select Cover Letter (Optional)</h4>
-                <select className="input">
+                <select
+                  value={selectedCoverLetterId}
+                  onChange={(e) => setSelectedCoverLetterId(e.target.value)}
+                  className="input"
+                >
                   <option value="">None</option>
                   {coverLetters.map((cl) => (
                     <option key={cl._id} value={cl._id}>
@@ -869,7 +948,7 @@ export function JobDetail() {
                 </select>
               </div>
               <button
-                onClick={() => handleApply()}
+                onClick={() => handleApply(selectedResumeId || undefined, selectedCoverLetterId || undefined)}
                 disabled={applyLoading || resumes.length === 0}
                 className="btn-primary w-full"
               >

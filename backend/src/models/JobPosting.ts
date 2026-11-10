@@ -12,24 +12,30 @@ export interface IJobPosting extends Document {
   externalId: string;
   source: string;
   sourceUrl: string;
+  companyCareerUrl?: string;       // Employer's official careers page
+  originalJobUrl?: string;         // Original employer posting (authoritative source)
   title: string;
   company: string;
   companyLogo?: string;
   location: ILocation;
   description: string;
   descriptionHtml?: string;
-  requirements: string[];
+  requirements: string[];          // Required qualifications
+  preferredQualifications: string[]; // Preferred qualifications
   responsibilities: string[];
   skills: string[];
   salaryMin?: number;
   salaryMax?: number;
   salaryCurrency: string;
-  jobType: string;
+  jobType: string;                 // Employment type: full-time, part-time, contract, etc.
+  workArrangement: 'remote' | 'hybrid' | 'on-site' | 'unspecified';
   experienceLevel: string;
   industry?: string;
   department?: string;
   postedDate: Date;
-  expiryDate?: Date;
+  discoveryDate: Date;             // When we first discovered this job
+  expiryDate?: Date;               // When the listing expired
+  applicationStatus: 'active' | 'expired' | 'filled';
   applicationUrl: string;
   applicationType: string;
   atsPlatform?: string;
@@ -64,21 +70,37 @@ const jobPostingSchema = new Schema<IJobPosting>({
   title: { type: String, required: true, trim: true, index: 'text' },
   company: { type: String, required: true, trim: true, index: true },
   companyLogo: { type: String, trim: true },
+  companyCareerUrl: { type: String, trim: true },
+  originalJobUrl: { type: String, trim: true },
   location: { type: locationSchema, required: true, index: true },
   description: { type: String, required: true, index: 'text' },
   descriptionHtml: { type: String },
   requirements: [{ type: String, trim: true }],
+  preferredQualifications: [{ type: String, trim: true }],
   responsibilities: [{ type: String, trim: true }],
   skills: [{ type: String, trim: true, index: true }],
   salaryMin: { type: Number, index: true },
   salaryMax: { type: Number, index: true },
   salaryCurrency: { type: String, default: 'CAD' },
   jobType: { type: String, required: true, trim: true, index: true },
+  workArrangement: {
+    type: String,
+    enum: ['remote', 'hybrid', 'on-site', 'unspecified'],
+    default: 'unspecified',
+    index: true,
+  },
   experienceLevel: { type: String, required: true, trim: true, index: true },
   industry: { type: String, trim: true, index: true },
   department: { type: String, trim: true, index: true },
   postedDate: { type: Date, required: true, index: true },
+  discoveryDate: { type: Date, required: true, default: Date.now, index: true },
   expiryDate: { type: Date, index: true },
+  applicationStatus: {
+    type: String,
+    enum: ['active', 'expired', 'filled'],
+    default: 'active',
+    index: true,
+  },
   applicationUrl: { type: String, required: true, trim: true },
   applicationType: { type: String, required: true, trim: true },
   atsPlatform: { type: String, trim: true, index: true },

@@ -331,9 +331,18 @@ export const generateResume = asyncHandler(async (req: AuthenticatedRequest, res
     atsAnalysis: result.atsAnalysis,
   });
 
-  // Save the generated resume - parse content into IResumeContent structure
+  // Save the generated resume - parse content into IResumeContent structure.
+  // Extract the first substantive paragraph as the professional summary; the
+  // full AI-generated text is preserved in rawContent (source of truth).
+  const lines = result.content.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  const professionalSummary = lines.find(l =>
+    !l.toLowerCase().startsWith('name:') &&
+    !l.toLowerCase().startsWith('contact:') &&
+    l.length > 20
+  ) || lines[0] || 'Generated resume';
+
   const resumeContent: IResumeContent = {
-    professionalSummary: result.content.split('\n')[0] || 'Generated resume',
+    professionalSummary,
     skills: { technical: [], soft: [] },
     experience: [],
     education: [],
@@ -390,7 +399,7 @@ export const generateCoverLetter = asyncHandler(async (req: AuthenticatedRequest
   const result = await aiResumeGenerator.generateCoverLetter(
     userProfile.toObject(),
     jobPosting.toObject(),
-    resume.content.professionalSummary, // Simplified - would need full resume content
+    resume.rawContent || JSON.stringify(resume.content),
     { tone, model }
   );
 
@@ -497,8 +506,9 @@ export const analyzeATS = asyncHandler(async (req: AuthenticatedRequest, res: Re
     throw createError('Job posting not found', 'NOT_FOUND', 404);
   }
 
-  // Convert resume content to string for analysis
-  const resumeText = JSON.stringify(resume.content);
+  // Convert resume content to string for analysis. Prefer rawContent (the full
+  // AI-generated resume text) over the stubbed structured content field.
+  const resumeText = resume.rawContent || JSON.stringify(resume.content);
 
   const analysis = await aiResumeGenerator.analyzeATSCompatibility(resumeText, jobPosting.description);
 
