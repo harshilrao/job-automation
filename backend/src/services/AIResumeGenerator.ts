@@ -256,8 +256,8 @@ export class AIResumeGenerator {
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
         ],
-        temperature: 0.1,
-        maxTokens: 2000,
+        temperature: 1,
+        maxTokens: 4096,
       });
     } else if (provider === 'groq') {
       const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -272,8 +272,8 @@ export class AIResumeGenerator {
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt },
           ],
-          temperature: 0.1,
-          max_completion_tokens: 2000,
+          temperature: 1,
+          max_completion_tokens: 4096,
           stream: false,
         }),
       });
@@ -292,8 +292,8 @@ export class AIResumeGenerator {
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt },
           ],
-          temperature: 0.1,
-          max_tokens: 2000,
+          temperature: 1,
+          max_tokens: 4096,
         }),
       });
       const data = await orResponse.json() as any;
@@ -429,8 +429,8 @@ export class AIResumeGenerator {
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt },
           ],
-          temperature: 0.3,
-          max_tokens: 4000,
+          temperature: 1,
+          max_tokens: 8192,
         },
         {
           headers: {
@@ -474,9 +474,13 @@ export class AIResumeGenerator {
             { role: 'user', content: userPrompt },
           ],
           temperature: 1,
-          max_completion_tokens: 2048,
+          max_completion_tokens: 4096,
           top_p: 1,
-          reasoning_effort: 'medium',
+          // reasoning_effort is only supported by Groq reasoning models (e.g. deepseek-r1).
+          // Sending it for non-reasoning models (llama, gpt-oss) causes a 400.
+          ...(groqModel.toLowerCase().includes('deepseek') || groqModel.toLowerCase().includes('r1')
+            ? { reasoning_effort: 'high' }
+            : {}),
           stream: false,
         },
         {
@@ -518,8 +522,8 @@ export class AIResumeGenerator {
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt },
           ],
-          temperature: 0.4,
-          max_tokens: 2000,
+          temperature: 1,
+          max_tokens: 4096,
         },
         {
           headers: {
@@ -561,8 +565,8 @@ export class AIResumeGenerator {
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt },
           ],
-          temperature: 0.4,
-          max_tokens: 2000,
+          temperature: 1,
+          max_tokens: 4096,
         },
         {
           headers: {
@@ -623,8 +627,8 @@ Optimize this resume for better ATS compatibility while preserving its exact str
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
         ],
-        temperature: 0.2,
-        maxTokens: 4000,
+        temperature: 1,
+        maxTokens: 8192,
       });
 
       return response.choices[0]?.message?.content || resumeContent;

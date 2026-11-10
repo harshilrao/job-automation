@@ -34,6 +34,7 @@ export function Settings() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [aiModels, setAiModels] = useState<Array<{ id: string; name: string; provider: string }>>(AI_MODELS);
 
   const form = useForm<SettingsForm>({
     resolver: zodResolver(settingsSchema),
@@ -58,22 +59,33 @@ export function Settings() {
   const loadSettings = async () => {
     setLoading(true);
     try {
-      // In a real app, you'd fetch from /api/settings
-      // For now, we'll use defaults
+      // Fetch available AI models from the backend
+      const response = await api.getAvailableModels();
+      const backendModels = (response.models || []) as Array<{ id: string; name: string; provider: string }>;
+      if (backendModels.length > 0) {
+        setAiModels(backendModels);
+      }
+      // Load persisted settings from localStorage
+      const saved = localStorage.getItem('job-automation-settings');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        form.reset(parsed as Partial<SettingsForm>);
+      }
     } catch (err) {
       console.error('Failed to load settings:', err);
+      setAiModels(AI_MODELS);
     } finally {
       setLoading(false);
     }
   };
 
-  const handleSubmit = async (_data: SettingsForm) => {
+  const handleSubmit = async (data: SettingsForm) => {
     setSaving(true);
     setError('');
     setSuccess('');
     try {
-      // In a real app, you'd POST to /api/settings
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      // Persist settings locally so preferences survive reloads
+      localStorage.setItem('job-automation-settings', JSON.stringify(data));
       setSuccess('Settings saved successfully!');
     } catch (err: any) {
       setError(err.response?.data?.error || 'Failed to save settings');
@@ -255,7 +267,7 @@ export function Settings() {
               <div>
                 <label className="label">Preferred AI Model</label>
                 <select {...form.register('preferredAiModel')} className="input max-w-md">
-                  {AI_MODELS.map(model => (
+                  {aiModels.map((model) => (
                     <option key={model.id} value={model.id}>
                       {model.name} ({model.provider})
                     </option>

@@ -40,8 +40,8 @@ export const testFreeClaude = asyncHandler(async (req: Request, res: Response) =
     messages: [
       { role: 'user', content: prompt },
     ],
-    temperature: 0.7,
-    maxTokens: 1000,
+    temperature: 1,
+    maxTokens: 4096,
   });
 
   res.json({
@@ -65,8 +65,8 @@ export const streamFreeClaude = asyncHandler(async (req: Request, res: Response)
     for await (const chunk of freeClaudeClient.streamChatCompletion({
       model: model || 'open_router/openrouter/free',
       messages: [{ role: 'user', content: prompt }],
-      temperature: 0.7,
-      maxTokens: 1000,
+      temperature: 1,
+      maxTokens: 4096,
       stream: true,
     })) {
       const content = chunk.choices[0]?.delta?.content || '';
@@ -99,8 +99,8 @@ export const extractKeywords = asyncHandler(async (req: Request, res: Response) 
       },
       { role: 'user', content: text },
     ],
-    temperature: 0.1,
-    maxTokens: 500,
+    temperature: 1,
+    maxTokens: 2048,
   });
 
   let keywords: string[] = [];
@@ -138,8 +138,8 @@ Return ONLY the improved resume content.`;
         content: `Job Description:\n${jobDescription}\n\nCurrent Resume:\n${resume}\n\nImprove this resume for the job.`,
       },
     ],
-    temperature: 0.3,
-    maxTokens: 4000,
+    temperature: 1,
+    maxTokens: 8192,
   });
 
   res.json({
@@ -172,8 +172,8 @@ Return as structured JSON.`;
         content: `Job Description:\n${jobDescription}\n\nResume:\n${resume || 'Not provided'}\n\nUser Profile:\n${JSON.stringify(userProfile || {}, null, 2)}`,
       },
     ],
-    temperature: 0.4,
-    maxTokens: 4000,
+    temperature: 1,
+    maxTokens: 8192,
   });
 
   let prep: any = {};
@@ -216,8 +216,8 @@ export const analyzeJobFit = asyncHandler(async (req: Request, res: Response) =>
         content: `Job Description:\n${jobDescription}\n\nUser Profile:\n${JSON.stringify(userProfile, null, 2)}`,
       },
     ],
-    temperature: 0.2,
-    maxTokens: 2000,
+    temperature: 1,
+    maxTokens: 4096,
   });
 
   let analysis: any = {};
@@ -258,8 +258,8 @@ Return ONLY a JSON array of improved bullet points.`;
         content: `Job Description:\n${jobDescription || 'Not provided'}\n\nCurrent Bullets:\n${bullets.map((b: string, i: number) => `${i + 1}. ${b}`).join('\n')}`,
       },
     ],
-    temperature: 0.3,
-    maxTokens: 1500,
+    temperature: 1,
+    maxTokens: 4096,
   });
 
   let improvedBullets: string[] = [];
@@ -307,8 +307,8 @@ Interview Notes: ${interviewNotes || 'General discussion about role and experien
 Tone: ${tone}`,
       },
     ],
-    temperature: 0.4,
-    maxTokens: 800,
+    temperature: 1,
+    maxTokens: 2048,
   });
 
   res.json({
@@ -340,8 +340,8 @@ Company: ${company || 'Not specified'}
 Role: ${role || 'Not specified'}`,
       },
     ],
-    temperature: 0.3,
-    maxTokens: 1500,
+    temperature: 1,
+    maxTokens: 4096,
   });
 
   res.json({

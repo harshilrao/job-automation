@@ -1,7 +1,7 @@
 import { JobPosting } from '../models/JobPosting';
 import { config } from '../config/env';
 import { logger } from '../utils/logger';
-import { sleep, retry, parseSalary, uniqueByFn } from '../utils/helpers';
+import { sleep, retry, parseSalary, uniqueByFn, normalizeUrl, normalizeEmployerName, canonicalJobKey } from '../utils/helpers';
 import { ONTARIO_CITIES, SCRAPER_DEFAULTS, JOB_SOURCES } from '../utils/constants';
 import axios from 'axios';
 import * as fs from 'fs';
@@ -46,6 +46,12 @@ export interface JobPost {
   jobLevel?: string;
   jobFunction?: string;
   industry?: string;
+  companyCareerUrl?: string;     // Employer's official careers page
+  originalJobUrl?: string;       // Original employer posting (authoritative source)
+  preferredQualifications?: string[];
+  workArrangement?: 'remote' | 'hybrid' | 'on-site' | 'unspecified';
+  discoveryDate?: Date;
+  applicationStatus?: 'active' | 'expired' | 'filled';
 }
 
 export class JobScraperService {
@@ -75,11 +81,17 @@ export class JobScraperService {
       hoursOld: cfg.hoursOld,
     });
 
-    // Scrape from each source using Python JobSpy
+    // Scrape from each source
     for (const source of cfg.sources) {
       console.log(`[SCRAPER] Starting scrape for source: ${source}`);
       try {
-        const jobs = await this.scrapeSource(source, cfg);
+        let jobs: JobPost[];
+        if (source === 'company') {
+          // Company career websites aren't a JobSpy site; scrape them directly
+          jobs = await this.scrapeCompanyCareers({ searchTerms: cfg.searchTerms });
+        } else {
+          jobs = await this.scrapeSource(source, cfg);
+        }
         console.log(`[SCRAPER] Source ${source} returned ${jobs.length} jobs`);
         allJobs.push(...jobs);
         await sleep(SCRAPER_DEFAULTS.RATE_LIMIT_DELAY);
@@ -102,8 +114,14 @@ export class JobScraperService {
 
     console.log(`[SCRAPER] Total raw jobs collected: ${allJobs.length}`);
 
-    // Deduplicate jobs
-    const uniqueJobs = this.deduplicateJobs(allJobs);
+    // Resolve original employer postings for aggregator-sourced jobs.
+    // Uses the original employer posting as the preferred authoritative source.
+    console.log('[SCRAPER] Resolving original employer postings...');
+    const resolvedJobs = await this.resolveOriginalPostings(allJobs);
+    console.log(`[SCRAPER] Resolution complete.`);
+
+    // Deduplicate jobs using canonical URL or normalized employer+title
+    const uniqueJobs = this.deduplicateJobs(resolvedJobs);
     console.log(`[SCRAPER] After dedup: ${uniqueJobs.length} unique jobs`);
 
     // Save to database
@@ -184,6 +202,8 @@ export class JobScraperService {
         'glassdoor': 'glassdoor',
         'ziprecruiter': 'zip_recruiter',
         'jobbank': 'job_bank',
+        'google': 'google',
+        'company': 'company',
       };
 
       const siteName = siteMap[source] || source;
@@ -237,10 +257,16 @@ try:
             'isRemote': bool(row.get('is_remote', False)),
             'employmentType': str(row.get('job_type', '')),
             'companyLogo': '',
-            'companyUrl': '',
+            'companyUrl': str(row.get('company_url', '')),
             'jobLevel': '',
             'jobFunction': '',
             'industry': str(row.get('company_industry', '')),
+            'companyCareerUrl': '',
+            'originalJobUrl': '',
+            'preferredQualifications': [],
+            'workArrangement': 'unspecified',
+            'applicationStatus': 'active',
+            'discoveryDate': '',
         }
         result.append(job)
 
@@ -286,6 +312,13 @@ except Exception as e:
             const jobs = result.map((job: any) => ({
               ...job,
               datePosted: job.datePosted ? new Date(job.datePosted) : new Date(),
+              discoveryDate: new Date(),
+              companyUrl: job.companyUrl || '',
+              companyCareerUrl: job.companyCareerUrl || '',
+              originalJobUrl: job.originalJobUrl || '',
+              preferredQualifications: job.preferredQualifications || [],
+              workArrangement: job.workArrangement || 'unspecified',
+              applicationStatus: job.applicationStatus || 'active',
             }));
             resolve(jobs);
           } else if (result.error) {
@@ -306,6 +339,240 @@ except Exception as e:
         reject(new Error(`Failed to spawn Python process: ${err.message}`));
       });
     });
+  }
+
+  /**
+   * Known aggregator domains. When a job URL points to one of these, the URL is
+   * an aggregator listing, not the original employer posting. We attempt to
+   * resolve the employer's official careers page as the authoritative source.
+   */
+  private readonly AGGREGATOR_DOMAINS = [
+    'linkedin.com', 'indeed.com', 'glassdoor.com', 'ziprecruiter.com',
+    'monster.com', 'careerbuilder.com', 'simplyhired.com', 'ziprecruiter.ca',
+    'indeed.ca', 'linkedin.ca', 'glassdoor.ca',
+  ];
+
+  /**
+   * Resolve the original employer posting for a job found on an aggregator.
+   * Best-effort:
+   * 1. If jobUrl is already on a company domain (not an aggregator), return it.
+   * 2. Otherwise fetch the job page HTML and look for links to the employer's
+   *    careers page (href with career/jobs/join-us keywords on a non-aggregator host).
+   * Returns the original job URL or undefined if none could be resolved.
+   */
+  private async resolveOriginalJobPosting(jobUrl: string, companyName?: string): Promise<string | undefined> {
+    try {
+      const jobUrlObj = new URL(jobUrl);
+      const host = jobUrlObj.hostname.toLowerCase();
+
+      // If already on a company domain (not a known aggregator), treat as original.
+      const isAggregator = this.AGGREGATOR_DOMAINS.some(d => host === d || host.endsWith(`.${d}`));
+      if (!isAggregator) {
+        return jobUrl;
+      }
+
+      // Fetch the aggregator job page to find a link to the employer's careers page.
+      const response = await axios.get(jobUrl, {
+        timeout: 15000,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml',
+        },
+        maxRedirects: 5,
+      });
+
+      const html = response.data as string;
+      if (!html || html.length < 1000) return undefined;
+
+      // Look for anchor tags with career-related hrefs
+      const careerLinkRegex = /<a[^>]+href=["']([^"']+)["'][^>]*>([^<]*)<\/a>/gi;
+      const careerKeywords = ['career', 'careers', 'job', 'jobs', 'join-us', 'joinus', 'work-with-us', 'workwithus', 'employment', 'positions', 'opportunities'];
+
+      const links: Array<{ href: string; text: string }> = [];
+      let match: RegExpExecArray | null;
+      while ((match = careerLinkRegex.exec(html)) !== null) {
+        links.push({ href: match[1], text: match[2] || '' });
+      }
+
+      // Score links: prefer same-domain company career links
+      const scored = links.map(link => {
+        let score = 0;
+        const hrefLower = link.href.toLowerCase();
+        const textLower = link.text.toLowerCase();
+
+        // Must have a career keyword in href or text
+        const hasKeyword = careerKeywords.some(k => hrefLower.includes(k) || textLower.includes(k));
+        if (!hasKeyword) return { ...link, score: 0 };
+
+        try {
+          const linkUrl = new URL(link.href, jobUrl);
+          const linkHost = linkUrl.hostname.toLowerCase();
+
+          // Skip aggregators
+          if (this.AGGREGATOR_DOMAINS.some(d => linkHost === d || linkHost.endsWith(`.${d}`))) {
+            return { ...link, score: 0 };
+          }
+
+          score += 50; // Non-aggregator domain
+
+          // Prefer links on the same host as redirected final URL
+          if (linkHost === host) score += 30;
+
+          // Prefer keyword in href
+          if (careerKeywords.some(k => hrefLower.includes(k))) score += 20;
+
+          // Prefer keyword in link text
+          if (careerKeywords.some(k => textLower.includes(k))) score += 10;
+
+          // If company name provided, prefer links containing it
+          if (companyName) {
+            const normCompany = normalizeEmployerName(companyName);
+            if (normCompany && (hrefLower.includes(normCompany) || textLower.includes(normCompany))) {
+              score += 15;
+            }
+          }
+
+          return { ...link, score, url: linkUrl.href };
+        } catch {
+          return { ...link, score: 0 };
+        }
+      });
+
+      scored.sort((a, b) => b.score - a.score);
+      const best = scored.find(l => l.score > 0);
+      return best?.url;
+    } catch (error: any) {
+      // Network/fetch failures are non-fatal: we just can't resolve the original posting
+      logger.debug(`Could not resolve original job posting for ${jobUrl}:`, error.message);
+      return undefined;
+    }
+  }
+
+  /**
+   * Try common employer careers URL patterns for a company domain.
+   * Returns the first pattern that responds with what looks like a careers page.
+   */
+  private async probeCompanyCareersUrl(companyDomain: string, companyName?: string): Promise<string | undefined> {
+    const protocols = ['https://', 'http://'];
+    const paths = [
+      '/careers', '/jobs', '/join-us', '/work-with-us', '/employment', '/positions',
+      '/about/careers', '/about/jobs', '/company/careers', '/company/jobs',
+      '/careers/', '/jobs/', '/join-us/', '/work-with-us/',
+    ];
+
+    for (const protocol of protocols) {
+      for (const path of paths) {
+        const url = `${protocol}${companyDomain}${path}`;
+        try {
+          const response = await axios.get(url, {
+            timeout: 10000,
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            },
+            maxRedirects: 3,
+          });
+          const html = (response.data as string) || '';
+          const lower = html.toLowerCase();
+          // Heuristic: careers pages usually mention jobs/careers/hiring prominently
+          const careerSignal = ['career', 'job', 'join', 'hiring', 'position', 'opportunity'].some(k => lower.includes(k));
+          if (careerSignal && html.length > 2000) {
+            return url;
+          }
+        } catch {
+          // Probe failed, try next pattern
+        }
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Scrape a company careers page for job listings. Best-effort: fetches the
+   * careers page, extracts job-looking links, and returns minimal JobPost
+   * entries. Callers should follow up with resolveOriginalJobPosting per job.
+   */
+  private async scrapeCompanyCareersPage(careerUrl: string, companyName: string): Promise<JobPost[]> {
+    const jobs: JobPost[] = [];
+    try {
+      const response = await axios.get(careerUrl, {
+        timeout: 15000,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        },
+        maxRedirects: 5,
+      });
+      const html = (response.data as string) || '';
+      if (!html || html.length < 1000) return jobs;
+
+      // Extract links that look like job postings
+      const jobLinkRegex = /<a[^>]+href=["']([^"']+)["'][^>]*>([^<]*)<\/a>/gi;
+      const jobKeywords = ['job', 'position', 'role', 'opening', 'career'];
+      const seen = new Set<string>();
+
+      let match: RegExpExecArray | null;
+      while ((match = jobLinkRegex.exec(html)) !== null) {
+        const href = match[1];
+        const text = (match[2] || '').trim();
+        if (!href || !text || text.length < 5) continue;
+
+        const hrefLower = href.toLowerCase();
+        const textLower = text.toLowerCase();
+        const looksLikeJob = jobKeywords.some(k => hrefLower.includes(k) || textLower.includes(k));
+        if (!looksLikeJob) continue;
+
+        try {
+          const absUrl = new URL(href, careerUrl).href;
+          if (seen.has(absUrl)) continue;
+          seen.add(absUrl);
+
+          jobs.push({
+            id: `company-${normalizeUrl(absUrl)}`,
+            title: text,
+            company: companyName,
+            location: '',
+            description: '',
+            jobUrl: absUrl,
+            applyUrl: absUrl,
+            source: 'company',
+            datePosted: new Date(),
+            companyCareerUrl: careerUrl,
+            originalJobUrl: absUrl,
+            workArrangement: 'unspecified',
+            applicationStatus: 'active',
+            discoveryDate: new Date(),
+          });
+        } catch {
+          // Skip malformed URLs
+        }
+      }
+    } catch (error: any) {
+      logger.debug(`Failed to scrape company careers page ${careerUrl}:`, error.message);
+    }
+    return jobs;
+  }
+
+  /**
+   * Scrape company career websites for configured companies. For each company
+   * in the search terms, probe common careers URL patterns and scrape job links.
+   */
+  private async scrapeCompanyCareers(config: { searchTerms: string[] }): Promise<JobPost[]> {
+    const jobs: JobPost[] = [];
+    for (const company of config.searchTerms) {
+      try {
+        // Derive a domain guess from the company name
+        const domainGuess = company.toLowerCase().replace(/[^a-z0-9]/g, '') + '.com';
+        const careerUrl = await this.probeCompanyCareersUrl(domainGuess, company);
+        if (careerUrl) {
+          const companyJobs = await this.scrapeCompanyCareersPage(careerUrl, company);
+          console.log(`[SCRAPER:company] ${company} careers page: ${companyJobs.length} jobs`);
+          jobs.push(...companyJobs);
+        }
+      } catch (error: any) {
+        console.error(`[SCRAPER:company] ${company} failed:`, error.message);
+      }
+      await sleep(1000);
+    }
+    return jobs;
   }
 
   /**
@@ -440,14 +707,77 @@ except Exception as e:
   }
 
   /**
-   * Deduplicate jobs based on title, company, and location
+   * Resolve original employer postings for jobs sourced from aggregators.
+   * Sets originalJobUrl (authoritative employer URL) and companyCareerUrl
+   * when they can be discovered. Failures are non-fatal.
+   */
+  private async resolveOriginalPostings(jobs: JobPost[]): Promise<JobPost[]> {
+    const AGGREGATOR_SOURCES = new Set(['indeed', 'linkedin', 'glassdoor', 'ziprecruiter', 'google']);
+    const resolved: JobPost[] = [];
+
+    for (const job of jobs) {
+      let resolvedJob = { ...job };
+
+      if (AGGREGATOR_SOURCES.has(job.source) && job.jobUrl) {
+        try {
+          const originalUrl = await this.resolveOriginalJobPosting(job.jobUrl, job.company);
+          if (originalUrl) {
+            resolvedJob.originalJobUrl = originalUrl;
+            // If the resolved URL is on a company domain, treat it as the careers page too
+            try {
+              const host = new URL(originalUrl).hostname.toLowerCase();
+              const isAgg = this.AGGREGATOR_DOMAINS.some(d => host === d || host.endsWith(`.${d}`));
+              if (!isAgg) {
+                resolvedJob.companyCareerUrl = originalUrl;
+              }
+            } catch {
+              // ignore URL parse issues
+            }
+            resolvedJob.applicationUrl = resolvedJob.originalJobUrl || resolvedJob.applyUrl;
+          }
+        } catch (error: any) {
+          logger.debug(`Original posting resolution failed for ${job.id}:`, error.message);
+        }
+      }
+
+      // Determine work arrangement from location/description signals
+      const locLower = (job.location || '').toLowerCase();
+      const descLower = (job.description || '').toLowerCase();
+      if (locLower.includes('remote') || descLower.includes('remote')) {
+        resolvedJob.workArrangement = 'remote';
+      } else if (locLower.includes('hybrid') || descLower.includes('hybrid')) {
+        resolvedJob.workArrangement = 'hybrid';
+      } else if (resolvedJob.workArrangement === 'unspecified') {
+        resolvedJob.workArrangement = 'on-site';
+      }
+
+      // Mark as expired if the posting is older than the hours-old window
+      if (job.datePosted) {
+        const hoursOld = (Date.now() - job.datePosted.getTime()) / (1000 * 60 * 60);
+        if (hoursOld > (SCRAPER_DEFAULTS.HOURS_OLD * 2)) {
+          resolvedJob.applicationStatus = 'expired';
+        }
+      }
+
+      resolved.push(resolvedJob);
+
+      // Small delay to be respectful when resolving many aggregator pages
+      if (AGGREGATOR_SOURCES.has(job.source)) {
+        await sleep(300);
+      }
+    }
+
+    return resolved;
+  }
+
+  /**
+   * Deduplicate jobs using canonical URL (most reliable) or normalized
+   * employer + title. Does NOT rely solely on title, company, and location
+   * as required by the master instructions.
    */
   private deduplicateJobs(jobs: JobPost[]): JobPost[] {
     return uniqueByFn(jobs, (job) => {
-      const title = job.title?.toLowerCase().trim() || '';
-      const company = job.company?.toLowerCase().trim() || '';
-      const location = job.location?.toLowerCase().trim() || '';
-      return `${title}|${company}|${location}`;
+      return canonicalJobKey(job.company, job.title, job.originalJobUrl || job.jobUrl);
     });
   }
 
@@ -463,10 +793,15 @@ except Exception as e:
 
     for (const job of jobs) {
       try {
-        const existing = await JobPosting.findOne({
-          source: job.source,
-          externalId: job.id,
-        });
+        // Prefer dedup by originalJobUrl (authoritative employer URL) when available,
+        // falling back to source+externalId. The same job may arrive from different
+        // aggregators with different externalIds but the same canonical URL.
+        const query: any = [{ source: job.source, externalId: job.id }];
+        if (job.originalJobUrl) {
+          query.push({ originalJobUrl: job.originalJobUrl });
+        }
+
+        let existing = await JobPosting.findOne({ $or: query });
 
         if (existing) {
           // Update if newer
@@ -499,6 +834,8 @@ except Exception as e:
       externalId: job.id,
       source: job.source,
       sourceUrl: job.jobUrl,
+      companyCareerUrl: job.companyCareerUrl,
+      originalJobUrl: job.originalJobUrl,
       title: job.title,
       company: job.company,
       companyLogo: job.companyLogo,
@@ -506,27 +843,31 @@ except Exception as e:
         city: this.extractCity(job.location),
         province: 'ON',
         country: 'Canada',
-        remote: job.isRemote || false,
-        hybrid: job.location?.toLowerCase().includes('hybrid') || false,
+        remote: job.workArrangement === 'remote' || job.isRemote || false,
+        hybrid: job.workArrangement === 'hybrid' || job.location?.toLowerCase().includes('hybrid') || false,
       },
       description: job.description,
       requirements: this.extractRequirements(job.description),
-      responsibilities: [],
+      preferredQualifications: job.preferredQualifications || this.extractPreferredQualifications(job.description),
+      responsibilities: this.extractResponsibilities(job.description),
       skills: this.extractSkills(job.description),
       salaryMin: min,
       salaryMax: max,
       salaryCurrency: currency || 'CAD',
-      jobType: this.normalizeJobType(job.jobType),
+      jobType: this.normalizeJobType(job.jobType || job.employmentType),
+      workArrangement: job.workArrangement || 'unspecified',
       experienceLevel: this.guessExperienceLevel(job.title, job.description),
       industry: job.industry,
       department: job.jobFunction,
       postedDate: job.datePosted || new Date(),
+      discoveryDate: job.discoveryDate || new Date(),
+      applicationStatus: job.applicationStatus || 'active',
       applicationUrl: job.applyUrl || job.jobUrl,
       applicationType: this.determineApplicationType(job.applyUrl, job.source),
       atsPlatform: this.detectATSPlatform(job.applyUrl),
       scrapedAt: new Date(),
       lastUpdated: new Date(),
-      isActive: true,
+      isActive: job.applicationStatus !== 'expired',
       metadata: {
         originalJob: job,
       },
@@ -542,29 +883,36 @@ except Exception as e:
     existing.title = job.title;
     existing.company = job.company;
     existing.companyLogo = job.companyLogo;
+    existing.companyCareerUrl = job.companyCareerUrl;
+    existing.originalJobUrl = job.originalJobUrl;
     existing.location = {
       city: this.extractCity(job.location),
       province: 'ON',
       country: 'Canada',
-      remote: job.isRemote || false,
-      hybrid: job.location?.toLowerCase().includes('hybrid') || false,
+      remote: job.workArrangement === 'remote' || job.isRemote || false,
+      hybrid: job.workArrangement === 'hybrid' || job.location?.toLowerCase().includes('hybrid') || false,
     };
     existing.description = job.description;
     existing.requirements = this.extractRequirements(job.description);
+    existing.preferredQualifications = job.preferredQualifications || this.extractPreferredQualifications(job.description);
+    existing.responsibilities = this.extractResponsibilities(job.description);
     existing.skills = this.extractSkills(job.description);
     existing.salaryMin = min;
     existing.salaryMax = max;
     existing.salaryCurrency = currency || 'CAD';
-    existing.jobType = this.normalizeJobType(job.jobType);
+    existing.jobType = this.normalizeJobType(job.jobType || job.employmentType);
+    existing.workArrangement = job.workArrangement || 'unspecified';
     existing.experienceLevel = this.guessExperienceLevel(job.title, job.description);
     existing.industry = job.industry;
     existing.department = job.jobFunction;
     existing.postedDate = job.datePosted || existing.postedDate;
+    existing.discoveryDate = job.discoveryDate || existing.discoveryDate;
+    existing.applicationStatus = job.applicationStatus || 'active';
     existing.applicationUrl = job.applyUrl || job.jobUrl;
     existing.applicationType = this.determineApplicationType(job.applyUrl, job.source);
     existing.atsPlatform = this.detectATSPlatform(job.applyUrl);
     existing.lastUpdated = new Date();
-    existing.isActive = true;
+    existing.isActive = job.applicationStatus !== 'expired';
     existing.metadata = { originalJob: job };
 
     await existing.save();
@@ -597,6 +945,41 @@ except Exception as e:
     const sentences = description.split(/[.!?]+/);
     return sentences
       .filter(s => reqKeywords.some(k => s.toLowerCase().includes(k)))
+      .map(s => s.trim())
+      .filter(s => s.length > 10)
+      .slice(0, 10);
+  }
+
+  /**
+   * Extract preferred qualifications from description
+   */
+  private extractPreferredQualifications(description: string): string[] {
+    const prefKeywords = [
+      'preferred', 'nice to have', 'bonus', 'plus', 'desired',
+      'ideally', 'advantageous', 'furthermore', 'additionally',
+    ];
+
+    const sentences = description.split(/[.!?]+/);
+    return sentences
+      .filter(s => prefKeywords.some(k => s.toLowerCase().includes(k)))
+      .map(s => s.trim())
+      .filter(s => s.length > 10)
+      .slice(0, 10);
+  }
+
+  /**
+   * Extract responsibilities from description
+   */
+  private extractResponsibilities(description: string): string[] {
+    const respKeywords = [
+      'responsibilities', 'duties', 'you will', 'role includes',
+      'key responsibilities', 'primary duties', 'accountable for',
+      'responsible for', 'tasked with', 'overview',
+    ];
+
+    const sentences = description.split(/[.!?]+/);
+    return sentences
+      .filter(s => respKeywords.some(k => s.toLowerCase().includes(k)))
       .map(s => s.trim())
       .filter(s => s.length > 10)
       .slice(0, 10);

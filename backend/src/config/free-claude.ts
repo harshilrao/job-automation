@@ -272,11 +272,15 @@ class FreeClaudeClient {
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
       ],
-      temperature: 0.3,
-      maxTokens: 4000,
+      temperature: 1,
+      maxTokens: 8192,
     });
 
-    return response.choices[0]?.message?.content || '';
+    const content = response.choices[0]?.message?.content;
+    if (!content || content.trim().length === 0) {
+      throw new Error('FreeClaude returned empty resume content');
+    }
+    return content;
   }
 
   async generateCoverLetter(
@@ -297,8 +301,8 @@ class FreeClaudeClient {
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
       ],
-      temperature: 0.4,
-      maxTokens: 2000,
+      temperature: 1,
+      maxTokens: 4096,
     });
 
     return response.choices[0]?.message?.content || '';
@@ -333,8 +337,8 @@ class FreeClaudeClient {
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
       ],
-      temperature: 0.1,
-      maxTokens: 2000,
+      temperature: 1,
+      maxTokens: 4096,
     });
 
     try {

@@ -254,6 +254,65 @@ export function uniqueByFn<T>(array: T[], fn: (item: T) => string): T[] {
 }
 
 /**
+ * Normalize a URL for deduplication: strip tracking params, trailing slash, fragment.
+ * Returns origin + pathname (best-effort canonical form).
+ */
+export function normalizeUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    u.hash = '';
+    u.searchParams.delete('utm_source');
+    u.searchParams.delete('utm_medium');
+    u.searchParams.delete('utm_campaign');
+    u.searchParams.delete('utm_term');
+    u.searchParams.delete('utm_content');
+    u.searchParams.delete('ref');
+    u.searchParams.delete('source');
+    u.searchParams.delete('campaign');
+    u.searchParams.set('sort', '');
+    // Rebuild search without empty params
+    const search = Array.from(u.searchParams.entries())
+      .filter(([, v]) => v.length > 0)
+      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+      .join('&');
+    u.search = search ? `?${search}` : '';
+    let pathname = u.pathname;
+    if (pathname.endsWith('/') && pathname.length > 1) {
+      pathname = pathname.slice(0, -1);
+    }
+    return `${u.origin}${pathname}${u.search}`;
+  } catch {
+    return url.trim().toLowerCase();
+  }
+}
+
+/**
+ * Normalize an employer/company name for deduplication: lowercase, strip legal
+ * suffixes and punctuation, collapse whitespace.
+ */
+export function normalizeEmployerName(name: string): string {
+  return name
+    .toLowerCase()
+    .trim()
+    .replace(/\b(inc|incorporated|corp|corporation|llc|ltd|limited|co|company|plc|gmbh|ag|sa|bv|oy|ab|spa|srl|kft|kd|pty|llp|lp|limited|partnership|holdings|group)\b/g, '')
+    .replace(/[^\w\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Build a canonical deduplication key for a job. Prefers a canonical URL when
+ * available (most reliable), falling back to normalized employer + title.
+ */
+export function canonicalJobKey(employer: string, title: string, jobUrl?: string): string {
+  if (jobUrl) {
+    const canonical = normalizeUrl(jobUrl);
+    if (canonical) return `url:${canonical}`;
+  }
+  return `name:${normalizeEmployerName(employer)}|title:${title.toLowerCase().trim()}`;
+}
+
+/**
  * Chunk array into smaller arrays
  */
 export function chunkArray<T>(array: T[], size: number): T[][] {
