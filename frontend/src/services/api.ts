@@ -179,8 +179,23 @@ class ApiService {
     return response.data;
   }
 
-  async triggerScrape() {
-    const response = await this.client.post('/jobs/scrape');
+  async deleteAllJobs() {
+    const response = await this.client.delete('/jobs/all');
+    return response.data;
+  }
+
+  async triggerScrape(filters: any) {
+    const response = await this.client.post('/jobs/scrape', { filters });
+    return response.data;
+  }
+
+  async cancelScrape(sessionId: string) {
+    const response = await this.client.post('/jobs/scrape/cancel', { sessionId });
+    return response.data;
+  }
+
+  async getScrapeProgress(sessionId?: string) {
+    const response = await this.client.get('/jobs/scrape/progress', { params: { sessionId } });
     return response.data;
   }
 

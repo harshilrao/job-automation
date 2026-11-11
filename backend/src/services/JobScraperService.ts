@@ -6,7 +6,7 @@ import { ONTARIO_CITIES, SCRAPER_DEFAULTS, JOB_SOURCES } from '../utils/constant
 import axios from 'axios';
 import * as fs from 'fs';
 import * as path from 'path';
-import { spawn } from 'child_process';
+import { spawn, type ChildProcess } from 'child_process';
 
 export interface ScraperResult {
   jobs: JobPost[];
@@ -51,7 +51,97 @@ export interface JobPost {
   preferredQualifications?: string[];
   workArrangement?: 'remote' | 'hybrid' | 'on-site' | 'unspecified';
   discoveryDate?: Date;
+  applicationUrl?: string;   // Resolved application URL (prefers original employer posting)
   applicationStatus?: 'active' | 'expired' | 'filled';
+}
+
+/**
+ * Live scrape progress for the frontend loading bar / ETA display.
+ */
+export type ScrapeStatus =
+  | 'idle'
+  | 'running'
+  | 'cancelling'
+  | 'cancelled'
+  | 'completed'
+  | 'failed';
+
+export interface ScrapeProgress {
+  status: ScrapeStatus;
+  currentSource: string | null;
+  sources: string[];
+  sourceIndex: number;
+  totalSources: number;
+  jobsFound: number;
+  jobsSaved: number;
+  jobsSkipped: number;
+  errors: Record<string, string>;
+  startedAt: Date | null;
+  etaMs: number | null;
+  completedAt: Date | null;
+  sourceProgress: Array<{
+    source: string;
+    status: 'pending' | 'running' | 'completed' | 'failed';
+    jobsFound: number;
+    error?: string;
+  }>;
+  /** Jobs found so far in this scrape session (capped), for real-time frontend display. */
+  foundJobs: JobPost[];
+  /** Filters used by the session (snapshot), for display and refresh recovery. */
+  filters?: ScrapeFilters;
+  message?: string;
+  sessionId?: string;
+}
+
+/**
+ * Filter criteria used to drive a scraping session. Mirrors the frontend
+ * FilterCriteria shape so the backend can scrape exactly what the user picked.
+ */
+export interface ScrapeFilters {
+  searchTerm?: string;
+  locations: string[];
+  jobTypes: string[];
+  experienceLevels: string[];
+  industries: string[];
+  departments: string[];
+  salaryMin?: number;
+  salaryMax?: number;
+  postedWithinHours?: number;
+  remoteOnly: boolean;
+  hybridOnly: boolean;
+  sources: string[];
+  excludedCompanies: string[];
+  excludedKeywords: string[];
+  requiredKeywords: string[];
+}
+
+/**
+ * A single scraping session. One active session per user at a time; sessions
+ * are owned by their userId so one user can never cancel another's scrape.
+ */
+export interface ScrapeSession {
+  sessionId: string;
+  userId: string;
+  status: ScrapeStatus;
+  filters: ScrapeFilters;
+  startTime: Date;
+  endTime?: Date;
+  currentSource: string | null;
+  sourceIndex: number;
+  jobsDiscovered: number;
+  jobsSaved: number;
+  jobsSkipped: number;
+  errors: Record<string, string>;
+  sourceProgress: Array<{
+    source: string;
+    status: 'pending' | 'running' | 'completed' | 'failed';
+    jobsFound: number;
+    error?: string;
+  }>;
+  foundJobs: JobPost[];
+  abortController: AbortController;
+  pythonProcess: ChildProcess | null;
+  message?: string;
 }
 
 export class JobScraperService {
@@ -64,16 +154,252 @@ export class JobScraperService {
     countryIndeed: SCRAPER_DEFAULTS.COUNTRY_INDEED,
   };
 
+  // Live scrape progress for frontend loading bar / ETA display.
+  // Mirrored from the active session so the legacy getScrapeProgress() shape
+  // keeps working for the scheduled scraper path.
+  private scrapeProgress: ScrapeProgress = {
+    status: 'idle',
+    currentSource: null,
+    sources: [],
+    sourceIndex: 0,
+    totalSources: 0,
+    jobsFound: 0,
+    jobsSaved: 0,
+    jobsSkipped: 0,
+    errors: {},
+    startedAt: null,
+    etaMs: null,
+    completedAt: null,
+    foundJobs: [],
+    sourceProgress: [],
+  };
+
+  // Active scraping sessions keyed by session id. One active session per user
+  // at a time; each session is owned by its userId.
+  private sessions = new Map<string, ScrapeSession>();
+
   /**
-   * Scrape jobs from all configured sources for Ontario
+   * Get scrape progress for the authenticated user's latest session, or for a
+   * specific session id (ownership is verified). Returns null when there is no
+   * matching session so the caller can report idle.
+   */
+  getScrapeProgress(userId?: string, sessionId?: string): ScrapeProgress | null {
+    if (sessionId) {
+      const session = this.getSession(sessionId, userId ?? '');
+      if (!session) return null;
+      return this.sessionToProgress(session);
+    }
+    if (userId) {
+      const session = this.getLatestSession(userId);
+      if (session) return this.sessionToProgress(session);
+    }
+    return { ...this.scrapeProgress };
+  }
+
+  /**
+   * Start a filter-driven scraping session for a user. Returns immediately;
+   * the scrape runs in the background and its progress is tracked on the
+   * session. Rejects when the user already has an active session.
+   */
+  startScrape(userId: string, filters: ScrapeFilters): ScrapeSession {
+    if (this.getActiveSession(userId)) {
+      throw new Error('A scraping session is already running for this user.');
+    }
+
+    const sessionId = `scrape-${userId}-${Date.now()}`;
+    const session: ScrapeSession = {
+      sessionId,
+      userId,
+      status: 'running',
+      filters,
+      startTime: new Date(),
+      currentSource: null,
+      sourceIndex: 0,
+      jobsDiscovered: 0,
+      jobsSaved: 0,
+      jobsSkipped: 0,
+      errors: {},
+      sourceProgress: [],
+      foundJobs: [],
+      abortController: new AbortController(),
+      pythonProcess: null,
+      message: 'Starting scrape...',
+    };
+    this.sessions.set(sessionId, session);
+
+    // Fire and forget: the HTTP response must not wait for the scrape.
+    this.runScrape(this.buildConfigFromFilters(filters), session).catch((error) => {
+      session.status = 'failed';
+      session.endTime = new Date();
+      session.errors['_fatal'] = error instanceof Error ? error.message : String(error);
+      session.message = 'Scraping failed.';
+      this.mirrorLegacyProgress(session);
+    });
+
+    return session;
+  }
+
+  /**
+   * Cancel a user's scraping session. Verifies ownership so one user cannot
+   * cancel another user's session. Returns false when there is no
+   * cancellable session.
+   */
+  cancelScrape(userId: string, sessionId: string): boolean {
+    const session = this.getSession(sessionId, userId);
+    if (!session) return false;
+    if (session.status !== 'running' && session.status !== 'cancelling') return false;
+
+    session.status = 'cancelling';
+    session.message = 'Cancelling scraping...';
+    session.abortController.abort();
+
+    // Stop the in-flight Python JobSpy subprocess immediately rather than
+    // waiting for the next abort check.
+    try {
+      session.pythonProcess?.kill();
+    } catch {
+      // ignore kill failures
+    }
+
+    console.log('[SCRAPER] Cancellation requested', { sessionId, userId });
+    return true;
+  }
+
+  /** The user's most recent session (any status). */
+  getLatestSession(userId: string): ScrapeSession | null {
+    let latest: ScrapeSession | null = null;
+    for (const session of this.sessions.values()) {
+      if (session.userId !== userId) continue;
+      if (!latest || session.startTime > latest.startTime) latest = session;
+    }
+    return latest;
+  }
+
+  /** The user's active (running or cancelling) session, if any. */
+  getActiveSession(userId: string): ScrapeSession | null {
+    let latest: ScrapeSession | null = null;
+    for (const session of this.sessions.values()) {
+      if (session.userId !== userId) continue;
+      if (session.status !== 'running' && session.status !== 'cancelling') continue;
+      if (!latest || session.startTime > latest.startTime) latest = session;
+    }
+    return latest;
+  }
+
+  /** Fetch a session only if it belongs to the given user. */
+  getSession(sessionId: string, userId: string): ScrapeSession | null {
+    const session = this.sessions.get(sessionId);
+    return session && session.userId === userId ? session : null;
+  }
+
+  isAborted(session: ScrapeSession): boolean {
+    return session.abortController.signal.aborted;
+  }
+
+  /** Strip non-serializable handles before sending progress to the frontend. */
+  serializeSession(session: ScrapeSession): ScrapeProgress {
+    const { abortController, pythonProcess, ...rest } = session;
+    return rest as unknown as ScrapeProgress;
+  }
+
+  private sessionToProgress(session: ScrapeSession): ScrapeProgress {
+    const progress = this.serializeSession(session);
+    progress.status = session.status;
+    progress.jobsFound = session.jobsDiscovered;
+    progress.sources = session.sourceProgress.map((sp) => sp.source);
+    progress.totalSources = session.sourceProgress.length;
+    progress.startedAt = session.startTime;
+    return progress;
+  }
+
+  /**
+   * Compute estimated time remaining based on average time per completed source.
+   */
+  private computeEtaMs(startedAt: Date, completedSources: number, totalSources: number): number | null {
+    if (completedSources === 0 || totalSources === 0) return null;
+    const elapsed = Date.now() - startedAt.getTime();
+    const avgPerSource = elapsed / completedSources;
+    const remaining = totalSources - completedSources;
+    return Math.max(0, avgPerSource * remaining);
+  }
+
+  /**
+   * Append newly found jobs to the real-time display list, capped to avoid unbounded memory growth.
+   */
+  private addFoundJobs(jobs: JobPost[]): void {
+    if (!jobs || jobs.length === 0) return;
+    const MAX_FOUND_JOBS_DISPLAY = 200;
+    this.scrapeProgress.foundJobs.push(...jobs);
+    if (this.scrapeProgress.foundJobs.length > MAX_FOUND_JOBS_DISPLAY) {
+      this.scrapeProgress.foundJobs = this.scrapeProgress.foundJobs.slice(-MAX_FOUND_JOBS_DISPLAY);
+    }
+  }
+
+  /**
+   * Scrape jobs from all configured sources for Ontario (legacy path used by
+   * the scheduled scraper — no user, no filters, no cancellation).
    */
   async scrapeAllJobs(customConfig?: Partial<ScraperConfig>): Promise<ScraperResult> {
     const cfg = { ...this.defaultConfig, ...customConfig };
+    return this.runScrape(cfg, null);
+  }
+
+  /**
+   * Core scraping loop. Driven either by scrapeAllJobs (session === null,
+   * legacy scheduled path) or by startScrape (filter-driven, cancellable).
+   *
+   * When a session is provided, progress, abort checks and filter validation
+   * are applied to that session; otherwise only the legacy scrapeProgress
+   * snapshot is updated.
+   */
+  private async runScrape(
+    cfg: ScraperConfig,
+    session: ScrapeSession | null
+  ): Promise<ScraperResult> {
     const startTime = Date.now();
     const allJobs: JobPost[] = [];
     const errors: Record<string, string> = {};
 
-    console.log('[SCRAPER] scrapeAllJobs started', {
+    const sourceList = [...cfg.sources, 'jobbank'];
+    const now = new Date();
+
+    const initProgress = () => {
+      const progress: Partial<ScrapeProgress> = {
+        status: 'running',
+        currentSource: null,
+        sources: sourceList,
+        sourceIndex: 0,
+        totalSources: sourceList.length,
+        jobsFound: 0,
+        jobsSaved: 0,
+        jobsSkipped: 0,
+        errors: {},
+        startedAt: now,
+        etaMs: this.computeEtaMs(now, 0, sourceList.length),
+        completedAt: null,
+        foundJobs: [],
+        sourceProgress: sourceList.map((s) => ({
+          source: s,
+          status: 'pending' as const,
+          jobsFound: 0,
+        })),
+      };
+      if (session) {
+        Object.assign(session, progress);
+        session.sourceProgress = sourceList.map((s) => ({
+          source: s,
+          status: 'pending' as const,
+          jobsFound: 0,
+        }));
+        session.message = 'Starting scrape...';
+      } else {
+        this.scrapeProgress = { ...this.scrapeProgress, ...progress };
+      }
+    };
+    initProgress();
+
+    console.log('[SCRAPER] Scrape started', {
+      sessionId: session?.sessionId,
       sources: cfg.sources,
       locations: cfg.locations,
       searchTerms: cfg.searchTerms,
@@ -82,7 +408,31 @@ export class JobScraperService {
     });
 
     // Scrape from each source
+    let completedCount = 0;
     for (const source of cfg.sources) {
+      if (session && this.isAborted(session)) break;
+
+      const setCurrent = (src: string | null) => {
+        if (session) {
+          session.currentSource = src;
+          session.sourceIndex = src === null ? 0 : sourceList.indexOf(src);
+        } else {
+          this.scrapeProgress.currentSource = src;
+          this.scrapeProgress.sourceIndex = src === null ? 0 : sourceList.indexOf(src);
+        }
+      };
+
+      setCurrent(source);
+      if (session) {
+        session.sourceProgress = session.sourceProgress.map((sp) =>
+          sp.source === source ? { ...sp, status: 'running' } : sp
+        );
+      } else {
+        this.scrapeProgress.sourceProgress = this.scrapeProgress.sourceProgress.map((sp) =>
+          sp.source === source ? { ...sp, status: 'running' } : sp
+        );
+      }
+
       console.log(`[SCRAPER] Starting scrape for source: ${source}`);
       try {
         let jobs: JobPost[];
@@ -90,80 +440,321 @@ export class JobScraperService {
           // Company career websites aren't a JobSpy site; scrape them directly
           jobs = await this.scrapeCompanyCareers({ searchTerms: cfg.searchTerms });
         } else {
-          jobs = await this.scrapeSource(source, cfg);
+          jobs = await this.scrapeSource(source, cfg, session);
         }
         console.log(`[SCRAPER] Source ${source} returned ${jobs.length} jobs`);
-        allJobs.push(...jobs);
+
+        let matching = jobs;
+        if (session) {
+          // Validate results against the user's chosen filters BEFORE saving.
+          matching = jobs.filter((job) => this.matchesFilters(job, session.filters));
+          const skipped = jobs.length - matching.length;
+          session.jobsDiscovered += jobs.length;
+          session.jobsSkipped += skipped;
+          console.log(`[SCRAPER] ${matching.length}/${jobs.length} jobs matched the selected filters`);
+        }
+        allJobs.push(...matching);
+
+        completedCount += 1;
+        if (session) {
+          session.foundJobs.push(...matching);
+          if (session.foundJobs.length > 200) {
+            session.foundJobs = session.foundJobs.slice(-200);
+          }
+          session.sourceProgress = session.sourceProgress.map((sp) =>
+            sp.source === source
+              ? { ...sp, status: 'completed' as const, jobsFound: matching.length }
+              : sp
+          );
+          this.mirrorLegacyProgress(session);
+        } else {
+          this.scrapeProgress.jobsFound = allJobs.length;
+          this.addFoundJobs(jobs);
+          this.scrapeProgress.sourceProgress = this.scrapeProgress.sourceProgress.map((sp) =>
+            sp.source === source
+              ? { ...sp, status: 'completed' as const, jobsFound: jobs.length }
+              : sp
+          );
+          this.scrapeProgress.etaMs = this.computeEtaMs(
+            this.scrapeProgress.startedAt!,
+            completedCount,
+            sourceList.length
+          );
+        }
+
         await sleep(SCRAPER_DEFAULTS.RATE_LIMIT_DELAY);
       } catch (error: any) {
+        if (session && this.isAborted(session)) break;
         console.error(`[SCRAPER] Source ${source} FAILED:`, error.message);
-        errors[source] = error.message;
+        if (session) {
+          session.errors[source] = error.message;
+          session.sourceProgress = session.sourceProgress.map((sp) =>
+            sp.source === source
+              ? { ...sp, status: 'failed' as const, error: error.message }
+              : sp
+          );
+          this.mirrorLegacyProgress(session);
+        } else {
+          errors[source] = error.message;
+          this.scrapeProgress.errors[source] = error.message;
+          this.scrapeProgress.sourceProgress = this.scrapeProgress.sourceProgress.map((sp) =>
+            sp.source === source
+              ? { ...sp, status: 'failed' as const, error: error.message }
+              : sp
+          );
+        }
       }
     }
 
     // Also try Job Bank CSV (Government of Canada)
-    console.log('[SCRAPER] Starting Job Bank CSV scrape');
-    try {
-      const jobBankJobs = await this.scrapeJobBank();
-      console.log(`[SCRAPER] Job Bank returned ${jobBankJobs.length} jobs`);
-      allJobs.push(...jobBankJobs);
-    } catch (error: any) {
-      console.error('[SCRAPER] Job Bank FAILED:', error.message);
-      errors['jobbank'] = error.message;
+    const jobbankSource = 'jobbank';
+    if (!session || !this.isAborted(session)) {
+      if (session) {
+        session.currentSource = jobbankSource;
+        session.sourceIndex = sourceList.indexOf(jobbankSource);
+        session.sourceProgress = session.sourceProgress.map((sp) =>
+          sp.source === jobbankSource ? { ...sp, status: 'running' } : sp
+        );
+      } else {
+        this.scrapeProgress.currentSource = jobbankSource;
+        this.scrapeProgress.sourceIndex = sourceList.indexOf(jobbankSource);
+        this.scrapeProgress.sourceProgress = this.scrapeProgress.sourceProgress.map((sp) =>
+          sp.source === jobbankSource ? { ...sp, status: 'running' } : sp
+        );
+      }
+
+      console.log('[SCRAPER] Starting Job Bank CSV scrape');
+      try {
+        const jobBankJobs = await this.scrapeJobBank();
+        console.log(`[SCRAPER] Job Bank returned ${jobBankJobs.length} jobs`);
+
+        let matching = jobBankJobs;
+        if (session) {
+          matching = jobBankJobs.filter((job) => this.matchesFilters(job, session.filters));
+          const skipped = jobBankJobs.length - matching.length;
+          session.jobsDiscovered += jobBankJobs.length;
+          session.jobsSkipped += skipped;
+        }
+        allJobs.push(...matching);
+
+        completedCount += 1;
+        if (session) {
+          session.foundJobs.push(...matching);
+          if (session.foundJobs.length > 200) {
+            session.foundJobs = session.foundJobs.slice(-200);
+          }
+          session.sourceProgress = session.sourceProgress.map((sp) =>
+            sp.source === jobbankSource
+              ? { ...sp, status: 'completed' as const, jobsFound: matching.length }
+              : sp
+          );
+          this.mirrorLegacyProgress(session);
+        } else {
+          this.scrapeProgress.jobsFound = allJobs.length;
+          this.addFoundJobs(jobBankJobs);
+          this.scrapeProgress.sourceProgress = this.scrapeProgress.sourceProgress.map((sp) =>
+            sp.source === jobbankSource
+              ? { ...sp, status: 'completed' as const, jobsFound: jobBankJobs.length }
+              : sp
+          );
+        }
+      } catch (error: any) {
+        if (session && this.isAborted(session)) {
+          // fall through to finalize as cancelled
+        } else {
+          console.error('[SCRAPER] Job Bank FAILED:', error.message);
+          if (session) {
+            session.errors['jobbank'] = error.message;
+            session.sourceProgress = session.sourceProgress.map((sp) =>
+              sp.source === jobbankSource
+                ? { ...sp, status: 'failed' as const, error: error.message }
+                : sp
+            );
+            this.mirrorLegacyProgress(session);
+          } else {
+            errors['jobbank'] = error.message;
+            this.scrapeProgress.errors['jobbank'] = error.message;
+            this.scrapeProgress.sourceProgress = this.scrapeProgress.sourceProgress.map((sp) =>
+              sp.source === jobbankSource
+                ? { ...sp, status: 'failed' as const, error: error.message }
+                : sp
+            );
+          }
+        }
+      }
     }
 
     console.log(`[SCRAPER] Total raw jobs collected: ${allJobs.length}`);
 
     // Resolve original employer postings for aggregator-sourced jobs.
     // Uses the original employer posting as the preferred authoritative source.
-    console.log('[SCRAPER] Resolving original employer postings...');
-    const resolvedJobs = await this.resolveOriginalPostings(allJobs);
-    console.log(`[SCRAPER] Resolution complete.`);
+    // Abort-safe: stops processing results once cancellation is detected.
+    if (!session || !this.isAborted(session)) {
+      console.log('[SCRAPER] Resolving original employer postings...');
+      const resolvedJobs = await this.resolveOriginalPostings(allJobs, session ?? undefined);
+      console.log(`[SCRAPER] Resolution complete.`);
 
-    // Deduplicate jobs using canonical URL or normalized employer+title
-    const uniqueJobs = this.deduplicateJobs(resolvedJobs);
-    console.log(`[SCRAPER] After dedup: ${uniqueJobs.length} unique jobs`);
+      // Deduplicate jobs using canonical URL or normalized employer+title
+      const uniqueJobs = this.deduplicateJobs(resolvedJobs);
+      console.log(`[SCRAPER] After dedup: ${uniqueJobs.length} unique jobs`);
 
-    // Save to database
-    console.log('[SCRAPER] Saving jobs to database...');
-    const savedCount = await this.saveJobs(uniqueJobs);
-    console.log(`[SCRAPER] Saved ${savedCount} new jobs to database`);
+      // Save to database (abort-safe: stops saving once cancellation detected)
+      console.log('[SCRAPER] Saving jobs to database...');
+      const savedResult = await this.saveJobs(uniqueJobs, session ?? undefined);
+      console.log(`[SCRAPER] Saved ${savedResult.saved} new jobs to database`);
+
+      if (session) {
+        session.jobsSaved = savedResult.saved + savedResult.updated;
+        session.jobsSkipped += savedResult.skipped;
+      }
+    }
 
     const duration = Date.now() - startTime;
-    console.log('[SCRAPER] scrapeAllJobs completed', {
+
+    // Finalize progress
+    if (session) {
+      if (this.isAborted(session)) {
+        session.status = 'cancelled';
+        session.message = 'Scraping cancelled. Previously saved jobs have been preserved.';
+      } else {
+        session.status = 'completed';
+        session.message = 'Scraping completed.';
+      }
+      session.endTime = new Date();
+      session.currentSource = null;
+      this.mirrorLegacyProgress(session);
+
+      console.log('[SCRAPER] Session scrape completed', {
+        sessionId: session.sessionId,
+        status: session.status,
+        duration,
+        totalRaw: allJobs.length,
+        saved: session.jobsSaved,
+        skipped: session.jobsSkipped,
+        errors: Object.keys(session.errors),
+      });
+
+      return {
+        jobs: allJobs,
+        errors: session.errors,
+        meta: {
+          duration,
+          sources: cfg.sources,
+          totalFound: session.jobsSaved,
+        },
+      };
+    }
+
+    this.scrapeProgress.status = 'completed';
+    this.scrapeProgress.completedAt = new Date();
+    this.scrapeProgress.currentSource = null;
+    this.scrapeProgress.etaMs = 0;
+
+    console.log('[SCRAPER] Legacy scrape completed', {
       duration,
       totalRaw: allJobs.length,
-      uniqueJobs: uniqueJobs.length,
-      saved: savedCount,
       errors: Object.keys(errors),
     });
 
     return {
-      jobs: uniqueJobs,
+      jobs: allJobs,
       errors,
       meta: {
         duration,
         sources: cfg.sources,
-        totalFound: uniqueJobs.length,
+        totalFound: allJobs.length,
       },
     };
   }
 
   /**
-   * Scrape jobs from a specific source using Python JobSpy via subprocess
+   * Copy session progress onto the legacy singleton so getScrapeProgress()
+   * without a user id still reflects the latest scrape.
    */
-  private async scrapeSource(source: string, config: ScraperConfig): Promise<JobPost[]> {
+  private mirrorLegacyProgress(session: ScrapeSession): void {
+    this.scrapeProgress = {
+      status: session.status,
+      currentSource: session.currentSource,
+      sources: session.sourceProgress.map((sp) => sp.source),
+      sourceIndex: session.sourceIndex,
+      totalSources: session.sourceProgress.length,
+      jobsFound: session.jobsDiscovered,
+      jobsSaved: session.jobsSaved,
+      jobsSkipped: session.jobsSkipped,
+      errors: { ...session.errors },
+      startedAt: session.startTime,
+      etaMs: null,
+      completedAt: session.endTime ?? null,
+      foundJobs: session.foundJobs,
+      sourceProgress: session.sourceProgress,
+      filters: session.filters,
+      message: session.message,
+      sessionId: session.sessionId,
+    };
+  }
+
+  /**
+   * Build a JobSpy configuration from the user's chosen filters.
+   * Filters are applied at the source where JobSpy supports them (search term,
+   * location, hours-old). Everything else is validated on the results before
+   * they are saved.
+   */
+  private buildConfigFromFilters(filters: ScrapeFilters): ScraperConfig {
+    const searchTerms: string[] = [];
+    if (filters.searchTerm) {
+      searchTerms.push(filters.searchTerm);
+    } else if (filters.departments?.length) {
+      // JobSpy has no department filter, so search by department names.
+      searchTerms.push(...filters.departments);
+    } else {
+      searchTerms.push(...this.defaultConfig.searchTerms);
+    }
+
+    const locations = filters.locations?.length
+      ? [...filters.locations]
+      : [...this.defaultConfig.locations];
+
+    const sources = filters.sources?.length
+      ? [...filters.sources]
+      : [...this.defaultConfig.sources];
+
+    return {
+      searchTerms,
+      locations,
+      sources,
+      resultsWanted: SCRAPER_DEFAULTS.RESULTS_WANTED,
+      hoursOld: filters.postedWithinHours ?? SCRAPER_DEFAULTS.HOURS_OLD,
+      countryIndeed: this.defaultConfig.countryIndeed,
+    };
+  }
+
+  /**
+   * Scrape jobs from a specific source using Python JobSpy via subprocess.
+   * Abort-safe: stops between locations/search terms when cancellation is
+   * requested.
+   */
+  private async scrapeSource(
+    source: string,
+    config: ScraperConfig,
+    session: ScrapeSession | null
+  ): Promise<JobPost[]> {
     const allJobs: JobPost[] = [];
 
     console.log(`[SCRAPER:${source}] Starting scrapeSource with ${config.locations.length} locations x ${config.searchTerms.length} search terms`);
 
     for (const location of config.locations) {
+      if (session && this.isAborted(session)) break;
       for (const searchTerm of config.searchTerms) {
+        if (session && this.isAborted(session)) break;
         console.log(`[SCRAPER:${source}] Scraping "${searchTerm}" in "${location}"`);
         try {
           const jobs = await retry(
-            () => this.runPythonJobSpy(source, searchTerm, location, config),
-            { maxAttempts: SCRAPER_DEFAULTS.MAX_RETRIES }
+            () => this.runPythonJobSpy(source, searchTerm, location, config, session),
+            {
+              maxAttempts: SCRAPER_DEFAULTS.MAX_RETRIES,
+              // Don't retry once cancellation has been requested.
+              shouldRetry: () => !(session && this.isAborted(session)),
+            }
           );
 
           if (jobs && jobs.length > 0) {
@@ -173,12 +764,14 @@ export class JobScraperService {
             console.log(`[SCRAPER:${source}] No jobs found for "${searchTerm}" in "${location}"`);
           }
         } catch (error: any) {
+          if (session && this.isAborted(session)) break;
           console.error(`[SCRAPER:${source}] Failed for "${searchTerm}" in "${location}":`, error.message);
         }
 
         // Small delay between searches
         await sleep(500);
       }
+      if (session && this.isAborted(session)) break;
     }
 
     console.log(`[SCRAPER:${source}] Total from this source: ${allJobs.length} jobs`);
@@ -186,13 +779,16 @@ export class JobScraperService {
   }
 
   /**
-   * Run Python JobSpy script via subprocess
+   * Run Python JobSpy script via subprocess.
+   * Abort-safe: when the session is aborted the subprocess is killed and the
+   * promise resolves with an empty list (cancellation, not failure).
    */
   private runPythonJobSpy(
     source: string,
     searchTerm: string,
     location: string,
-    config: ScraperConfig
+    config: ScraperConfig,
+    session: ScrapeSession | null
   ): Promise<JobPost[]> {
     return new Promise((resolve, reject) => {
       // Map source names to JobSpy site names
@@ -206,15 +802,32 @@ export class JobScraperService {
         'company': 'company',
       };
 
-      const siteName = siteMap[source] || source;
+      // Validate the source / platform before spawning a subprocess.
+      if (!siteMap[source]) {
+        reject(new Error(`Unsupported scraping source: ${source}`));
+        return;
+      }
+      const siteName = siteMap[source];
 
-      console.log(`[SCRAPER:${source}] Spawning Python JobSpy for "${searchTerm}" in "${location}" (site: ${siteName})`);
+      // Validate the Indeed country value (passed straight to Indeed by JobSpy).
+      const countryIndeed = String(config.countryIndeed || 'Canada').trim();
+      if (!countryIndeed || countryIndeed.length > 64) {
+        reject(new Error(`Invalid Indeed country value: ${config.countryIndeed}`));
+        return;
+      }
 
-      // Python script to run JobSpy
+      console.log(
+        `[SCRAPER:${source}] Spawning Python JobSpy for "${searchTerm}" in "${location}" (site: ${siteName})`
+      );
+
+      // Fixed Python script: NO interpolation of external values. All
+      // configuration is passed as JSON on stdin, which eliminates Python
+      // string injection from quotes, backslashes, Unicode or newlines.
       const pythonScript = `
 import sys
 import json
 import math
+import pandas as pd
 from jobspy import scrape_jobs
 
 def safe_float(val):
@@ -224,43 +837,63 @@ def safe_float(val):
     except (TypeError, ValueError):
         return None
 
+def safe_str(val):
+    if val is None:
+        return ''
+    try:
+        if pd.isna(val):
+            return ''
+    except (TypeError, ValueError):
+        pass
+    return str(val)
+
 try:
+    config = json.loads(sys.stdin.read())
+    site_name = config.get('site_name')
+    search_term = config.get('search_term', '')
+    location = config.get('location', '')
+    results_wanted = int(config.get('results_wanted', 3) or 3)
+    hours_old = int(config.get('hours_old', 72) or 72)
+    country_indeed = config.get('country_indeed', 'Canada') or 'Canada'
+    source = config.get('source', '')
+
     jobs = scrape_jobs(
-        site_name=["${siteName}"],
-        search_term="${searchTerm.replace(/"/g, '\\"')}",
-        location="${location.replace(/"/g, '\\"')}, ON, Canada",
-        results_wanted=${config.resultsWanted},
-        hours_old=${config.hoursOld},
-        country_indeed="${config.countryIndeed}",
+        site_name=[site_name],
+        search_term=search_term,
+        location=f"{location}, ON, Canada",
+        results_wanted=results_wanted,
+        hours_old=hours_old,
+        country_indeed=country_indeed,
     )
 
     # Convert to list of dicts
     result = []
     for _, row in jobs.iterrows():
+        job_id = row.get('job_id', '')
         job = {
-            'id': f"${source}-{row.get('job_id', '')}",
-            'title': str(row.get('title', '')),
-            'company': str(row.get('company', '')),
-            'location': str(row.get('location', '')),
-            'description': str(row.get('description', '')),
-            'jobUrl': str(row.get('job_url', '')),
-            'applyUrl': str(row.get('job_url', '')),
-            'source': "${source}",
+            'id': f"{source}-{safe_str(job_id)}",
+            'title': safe_str(row.get('title', '')),
+            'company': safe_str(row.get('company', '')),
+            'location': safe_str(row.get('location', '')),
+            'description': safe_str(row.get('description', '')),
+            'jobUrl': safe_str(row.get('job_url', '')),
+            'applyUrl': safe_str(row.get('job_url', '')),
+            'source': source,
             'datePosted': str(row.get('date_posted', '')) if row.get('date_posted') else '',
             'salary': {
                 'min': safe_float(row.get('min_amount', 0)),
                 'max': safe_float(row.get('max_amount', 0)),
-                'currency': str(row.get('currency', 'CAD')) if row.get('currency') else 'CAD',
-                'type': str(row.get('interval', 'yearly')) if row.get('interval') else 'yearly',
+                'currency': safe_str(row.get('currency', 'CAD')) if row.get('currency') else 'CAD',
+                'type': safe_str(row.get('interval', 'yearly')) if row.get('interval') else 'yearly',
             },
-            'jobType': str(row.get('job_type', '')),
+            'jobType': safe_str(row.get('job_type', '')),
             'isRemote': bool(row.get('is_remote', False)),
-            'employmentType': str(row.get('job_type', '')),
+            'employmentType': safe_str(row.get('job_type', '')),
             'companyLogo': '',
-            'companyUrl': str(row.get('company_url', '')),
+            'companyUrl': safe_str(row.get('company_url', '')),
             'jobLevel': '',
             'jobFunction': '',
-            'industry': str(row.get('company_industry', '')),
+            'industry': safe_str(row.get('company_industry', '')),
             'companyCareerUrl': '',
             'originalJobUrl': '',
             'preferredQualifications': [],
@@ -276,27 +909,83 @@ except Exception as e:
     sys.exit(1)
 `;
 
-      const pythonProcess = spawn('python', ['-c', pythonScript], {
+      const scraperConfig = {
+        site_name: siteName,
+        search_term: searchTerm,
+        location,
+        results_wanted: config.resultsWanted,
+        hours_old: config.hoursOld,
+        country_indeed: countryIndeed,
+        source,
+      };
+
+      let stdinWritten = false;
+      if (session) session.pythonProcess = spawn('python', ['-c', pythonScript], {
         stdio: ['pipe', 'pipe', 'pipe'],
         timeout: 60000, // 60 second timeout
       });
+      const child = session ? session.pythonProcess : null;
+
+      const stdin = child?.stdin;
+      if (stdin) {
+        stdin.write(JSON.stringify(scraperConfig));
+        stdin.end();
+        stdinWritten = true;
+      }
 
       let stdout = '';
       let stderr = '';
 
-      pythonProcess.stdout.on('data', (data) => {
+      // Immediate kill on cancellation rather than waiting for loop checks.
+      const onAbort = () => {
+        try {
+          child?.kill();
+        } catch {
+          // ignore kill failures
+        }
+      };
+      if (session) {
+        session.abortController.signal.addEventListener('abort', onAbort, { once: true });
+      }
+
+      const stdoutHandler = (data: Buffer) => {
         stdout += data.toString();
-      });
-
-      pythonProcess.stderr.on('data', (data) => {
+      };
+      const stderrHandler = (data: Buffer) => {
         stderr += data.toString();
-      });
+      };
 
-      pythonProcess.on('close', (code) => {
+      if (child) {
+        child.stdout?.on('data', stdoutHandler);
+        child.stderr?.on('data', stderrHandler);
+      }
+
+      child?.on('close', (code: number | null) => {
+        if (session) {
+          session.pythonProcess = null;
+          session.abortController.signal.removeEventListener('abort', onAbort);
+        }
+        if (child) {
+          child.stdout?.off('data', stdoutHandler);
+          child.stderr?.off('data', stderrHandler);
+        }
+
         console.log(`[SCRAPER:${source}] Python process exited with code ${code}`, {
+          sessionId: session?.sessionId,
           stdoutLength: stdout.length,
           stderrLength: stderr.length,
         });
+
+        if (session && this.isAborted(session)) {
+          console.log(`[SCRAPER:${source}] Python process aborted for session ${session.sessionId}`);
+          resolve([]);
+          return;
+        }
+
+        if (!stdinWritten) {
+          reject(new Error('Python JobSpy failed: could not write configuration to stdin'));
+          return;
+        }
 
         if (code !== 0) {
           console.error(`[SCRAPER:${source}] Python JobSpy FAILED (code ${code}):`, stderr);
@@ -334,7 +1023,8 @@ except Exception as e:
         }
       });
 
-      pythonProcess.on('error', (err) => {
+      child?.on('error', (err: Error) => {
+        if (session) session.pythonProcess = null;
         console.error(`[SCRAPER:${source}] Failed to spawn Python process:`, err.message);
         reject(new Error(`Failed to spawn Python process: ${err.message}`));
       });
@@ -399,10 +1089,11 @@ except Exception as e:
         let score = 0;
         const hrefLower = link.href.toLowerCase();
         const textLower = link.text.toLowerCase();
+        let resolvedUrl: string | undefined;
 
         // Must have a career keyword in href or text
         const hasKeyword = careerKeywords.some(k => hrefLower.includes(k) || textLower.includes(k));
-        if (!hasKeyword) return { ...link, score: 0 };
+        if (!hasKeyword) return { ...link, score: 0, url: undefined };
 
         try {
           const linkUrl = new URL(link.href, jobUrl);
@@ -410,7 +1101,7 @@ except Exception as e:
 
           // Skip aggregators
           if (this.AGGREGATOR_DOMAINS.some(d => linkHost === d || linkHost.endsWith(`.${d}`))) {
-            return { ...link, score: 0 };
+            return { ...link, score: 0, url: undefined };
           }
 
           score += 50; // Non-aggregator domain
@@ -432,9 +1123,10 @@ except Exception as e:
             }
           }
 
-          return { ...link, score, url: linkUrl.href };
+          resolvedUrl = linkUrl.href;
+          return { ...link, score, url: resolvedUrl };
         } catch {
-          return { ...link, score: 0 };
+          return { ...link, score: 0, url: undefined };
         }
       });
 
@@ -709,13 +1401,18 @@ except Exception as e:
   /**
    * Resolve original employer postings for jobs sourced from aggregators.
    * Sets originalJobUrl (authoritative employer URL) and companyCareerUrl
-   * when they can be discovered. Failures are non-fatal.
+   * when they can be discovered. Failures are non-fatal. Abort-safe: stops
+   * processing results once cancellation is detected.
    */
-  private async resolveOriginalPostings(jobs: JobPost[]): Promise<JobPost[]> {
+  private async resolveOriginalPostings(
+    jobs: JobPost[],
+    session?: ScrapeSession
+  ): Promise<JobPost[]> {
     const AGGREGATOR_SOURCES = new Set(['indeed', 'linkedin', 'glassdoor', 'ziprecruiter', 'google']);
     const resolved: JobPost[] = [];
 
     for (const job of jobs) {
+      if (session && this.isAborted(session)) break;
       let resolvedJob = { ...job };
 
       if (AGGREGATOR_SOURCES.has(job.source) && job.jobUrl) {
@@ -782,16 +1479,21 @@ except Exception as e:
   }
 
   /**
-   * Save jobs to MongoDB
+   * Save jobs to MongoDB. Abort-safe: stops saving once cancellation is
+   * detected so jobs successfully saved before cancellation are preserved.
    */
-  private async saveJobs(jobs: JobPost[]): Promise<number> {
+  private async saveJobs(
+    jobs: JobPost[],
+    session?: ScrapeSession
+  ): Promise<{ saved: number; updated: number; skipped: number }> {
     let saved = 0;
     let updated = 0;
     let skipped = 0;
 
-    console.log(`[SCRAPER] saveJobs starting with ${jobs.length} jobs`);
+    console.log(`[SCRAPER] saveJobs starting with ${jobs.length} jobs${session ? ` (session ${session.sessionId})` : ''}`);
 
     for (const job of jobs) {
+      if (session && this.isAborted(session)) break;
       try {
         // Prefer dedup by originalJobUrl (authoritative employer URL) when available,
         // falling back to source+externalId. The same job may arrive from different
@@ -821,7 +1523,7 @@ except Exception as e:
     }
 
     console.log(`[SCRAPER] saveJobs completed: saved=${saved}, updated=${updated}, skipped=${skipped}`);
-    return saved;
+    return { saved, updated, skipped };
   }
 
   /**
@@ -916,6 +1618,86 @@ except Exception as e:
     existing.metadata = { originalJob: job };
 
     await existing.save();
+  }
+
+  /**
+   * Validate a scraped job against the session's chosen filters. Returns true
+   * only when the job matches every criterion the user selected. This prevents
+   * unrelated postings from being saved merely because they contain one broadly
+   * matching keyword.
+   */
+  private matchesFilters(job: JobPost, filters: ScrapeFilters): boolean {
+    const {
+      searchTerm,
+      locations,
+      jobTypes,
+      experienceLevels,
+      industries,
+      departments,
+      salaryMin,
+      salaryMax,
+      postedWithinHours,
+      remoteOnly,
+      hybridOnly,
+      excludedCompanies,
+      excludedKeywords,
+      requiredKeywords,
+    } = filters;
+
+    const searchable = `${job.title} ${job.company} ${job.description ?? ''}`.toLowerCase();
+
+    if (searchTerm && !searchable.includes(searchTerm.toLowerCase())) return false;
+
+    if (locations?.length) {
+      const loc = `${job.location ?? ''}`.toLowerCase();
+      if (!locations.some((l) => loc.includes(l.toLowerCase()))) return false;
+    }
+
+    if (jobTypes?.length) {
+      const normalized = this.normalizeJobType(job.jobType || job.employmentType);
+      if (!jobTypes.includes(normalized)) return false;
+    }
+
+    if (experienceLevels?.length) {
+      const level = job.jobLevel || this.guessExperienceLevel(job.title, job.description ?? '');
+      if (!experienceLevels.includes(level)) return false;
+    }
+
+    if (industries?.length) {
+      if (!industries.includes(job.industry || '')) return false;
+    }
+
+    if (departments?.length) {
+      if (!departments.includes(job.jobFunction || '')) return false;
+    }
+
+    if (remoteOnly && job.workArrangement !== 'remote' && !job.isRemote) return false;
+    if (hybridOnly && job.workArrangement !== 'hybrid') return false;
+
+    if (salaryMin != null) {
+      const max = job.salary?.max;
+      if (max == null || max < salaryMin) return false;
+    }
+
+    if (salaryMax != null) {
+      const min = job.salary?.min;
+      if (min == null || min > salaryMax) return false;
+    }
+
+    if (postedWithinHours && job.datePosted) {
+      const cutoff = Date.now() - postedWithinHours * 60 * 60 * 1000;
+      if (job.datePosted.getTime() < cutoff) return false;
+    }
+
+    if (excludedCompanies?.length && excludedCompanies.includes(job.company)) return false;
+
+    if (excludedKeywords?.length && excludedKeywords.some((kw) => searchable.includes(kw.toLowerCase())))
+      return false;
+
+    if (requiredKeywords?.length && !requiredKeywords.every((kw) => searchable.includes(kw.toLowerCase())))
+      return false;
+
+    return true;
   }
 
   /**

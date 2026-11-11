@@ -157,10 +157,49 @@ export const getJobById = asyncHandler(async (req: AuthenticatedRequest, res: Re
   res.json({ job });
 });
 
+export const deleteAllJobs = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+  const userId = req.user?.userId;
+  if (!userId) {
+    throw createError('Authentication required', 'AUTHENTICATION_ERROR', 401);
+  }
+
+  // NOTE: JobPosting has no userId field — jobs are scraped globally and shared
+  // across all users, so there is no per-user scoping possible on this model.
+  // We delete every document in the job_postings collection only. Related
+  // collections (application_records, generated_resumes, cover_letters,
+  // user_profiles) intentionally have no cascade and are left untouched.
+  const result = await JobPosting.deleteMany({});
+
+  res.json({
+    message: 'All job postings deleted successfully.',
+    deletedCount: result.deletedCount,
+  });
+});
+
 export const getJobStats = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const stats = await jobScraperService.getStats();
   res.json({ stats });
 });
+
+const hasSelectedFilters = (filters: any): boolean => {
+  if (!filters) return false;
+  return (
+    !!filters.searchTerm ||
+    (filters.locations && filters.locations.length > 0) ||
+    (filters.jobTypes && filters.jobTypes.length > 0) ||
+    (filters.experienceLevels && filters.experienceLevels.length > 0) ||
+    (filters.industries && filters.industries.length > 0) ||
+    (filters.departments && filters.departments.length > 0) ||
+    (filters.sources && filters.sources.length > 0) ||
+    filters.remoteOnly === true ||
+    filters.hybridOnly === true ||
+    (filters.salaryMin != null && filters.salaryMin > 0) ||
+    (filters.salaryMax != null && filters.salaryMax > 0) ||
+    (filters.requiredKeywords && filters.requiredKeywords.length > 0) ||
+    (filters.excludedKeywords && filters.excludedKeywords.length > 0) ||
+    (filters.excludedCompanies && filters.excludedCompanies.length > 0)
+  );
+};
 
 export const triggerScrape = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const userId = req.user?.userId;
@@ -169,24 +208,66 @@ export const triggerScrape = asyncHandler(async (req: AuthenticatedRequest, res:
     throw createError('Authentication required', 'AUTHENTICATION_ERROR', 401);
   }
 
-  console.log('[SCRAPE] Calling jobScraperService.scrapeAllJobs()');
-  const result = await jobScraperService.scrapeAllJobs();
+  const { filters } = req.body;
+  if (!hasSelectedFilters(filters)) {
+    throw createError(
+      'Please select at least one job filter before scraping.',
+      'VALIDATION_ERROR',
+      400
+    );
+  }
 
-  console.log('[SCRAPE] scrapeAllJobs completed:', {
-    totalFound: result.meta.totalFound,
-    uniqueJobs: result.meta.totalFound,
-    errors: Object.keys(result.errors),
-    duration: result.meta.duration,
+  console.log('[SCRAPE] Starting filter-based scraping session:', filters);
+  const session = jobScraperService.startScrape(userId, filters);
+
+  console.log('[SCRAPE] Session started:', {
+    sessionId: session.sessionId,
+    status: session.status,
   });
+
+  res.status(202).json({
+    message: 'Scraping started',
+    session: { sessionId: session.sessionId, status: session.status },
+  });
+});
+
+export const cancelScrape = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+  const userId = req.user?.userId;
+  console.log('[SCRAPE] cancelScrape called, userId:', userId);
+  if (!userId) {
+    throw createError('Authentication required', 'AUTHENTICATION_ERROR', 401);
+  }
+
+  const { sessionId } = req.body;
+  if (!sessionId) {
+    throw createError('Session ID is required', 'VALIDATION_ERROR', 400);
+  }
+
+  const cancelled = jobScraperService.cancelScrape(userId, sessionId);
+  if (!cancelled) {
+    throw createError('No active scraping session found to cancel', 'NOT_FOUND', 404);
+  }
+
+  console.log('[SCRAPE] Cancellation requested:', { sessionId, userId });
 
   res.json({
-    message: 'Scraping completed',
-    result: {
-      totalFound: result.meta.totalFound,
-      errors: result.errors,
-      duration: result.meta.duration,
-    },
+    message: 'Cancellation requested',
+    status: 'cancelling',
   });
+});
+
+export const getScrapeProgress = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+  const userId = req.user?.userId;
+  if (!userId) {
+    throw createError('Authentication required', 'AUTHENTICATION_ERROR', 401);
+  }
+
+  const sessionId = req.query.sessionId as string | undefined;
+  const progress = jobScraperService.getScrapeProgress(userId, sessionId);
+  if (!progress) {
+    return res.json({ progress: { status: 'idle' } });
+  }
+  res.json({ progress });
 });
 
 export const saveSearchFilter = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {

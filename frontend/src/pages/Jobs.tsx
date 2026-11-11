@@ -1,6 +1,19 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Search, Filter, RefreshCw, Briefcase, MapPin, ExternalLink, Loader2, AlertCircle } from 'lucide-react';
+import {
+  Search,
+  Filter,
+  RefreshCw,
+  Briefcase,
+  MapPin,
+  ExternalLink,
+  Loader2,
+  AlertCircle,
+  Clock,
+  Play,
+  Trash2,
+  X,
+} from 'lucide-react';
 import { api } from '../services/api';
 import { JobPosting, FilterCriteria } from '@shared/types';
 import { formatDistanceToNow } from 'date-fns';
@@ -51,6 +64,17 @@ export function Jobs() {
 
   const [savedFilters, setSavedFilters] = useState<any[]>([]);
   const [stats, setStats] = useState<any>(null);
+  const [scrapeProgress, setScrapeProgress] = useState<any>(null);
+  const [scraping, setScraping] = useState(false);
+  const [scrapeSessionId, setScrapeSessionId] = useState<string | null>(null);
+  const [scrapeError, setScrapeError] = useState('');
+  const scrapeIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Delete-all-jobs state
+  const [deletingAllJobs, setDeletingAllJobs] = useState(false);
+  const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
+  const [deleteSuccess, setDeleteSuccess] = useState(false);
 
   // Debounce search
   useEffect(() => {
@@ -71,9 +95,20 @@ export function Jobs() {
     loadStats();
   }, []);
 
+  // Cleanup scrape polling interval on unmount
+  useEffect(() => {
+    return () => {
+      if (scrapeIntervalRef.current) {
+        clearInterval(scrapeIntervalRef.current);
+      }
+    };
+  }, []);
+
   const loadJobs = async () => {
     setLoading(true);
     setError('');
+    setDeleteError('');
+    setDeleteSuccess(false);
 
     try {
       const params: any = {
@@ -128,6 +163,138 @@ export function Jobs() {
       setStats(response.stats);
     } catch (err) {
       console.error('Failed to load stats:', err);
+    }
+  };
+
+  const startScrapePolling = (sessionId: string) => {
+    if (scrapeIntervalRef.current) clearInterval(scrapeIntervalRef.current);
+    scrapeIntervalRef.current = setInterval(async () => {
+      try {
+        const response = await api.getScrapeProgress(sessionId);
+        const progress = response.progress;
+        setScrapeProgress(progress);
+
+        if (
+          progress.status === 'completed' ||
+          progress.status === 'failed' ||
+          progress.status === 'cancelled'
+        ) {
+          setScraping(false);
+          if (scrapeIntervalRef.current) {
+            clearInterval(scrapeIntervalRef.current);
+            scrapeIntervalRef.current = null;
+          }
+          // Refresh jobs once scraping completes so new results show
+          loadJobs();
+          loadStats();
+        }
+      } catch (err) {
+        console.error('Failed to get scrape progress:', err);
+      }
+    }, 2000);
+  };
+
+  const hasScrapeFilters = () => {
+    return (
+      !!filters.searchTerm.trim() ||
+      filters.locations.length > 0 ||
+      filters.jobTypes.length > 0 ||
+      filters.experienceLevels.length > 0 ||
+      filters.industries.length > 0 ||
+      filters.departments.length > 0 ||
+      !!filters.salaryMin ||
+      !!filters.salaryMax ||
+      filters.remoteOnly ||
+      filters.hybridOnly ||
+      filters.sources.length > 0 ||
+      filters.excludedCompanies.length > 0 ||
+      filters.excludedKeywords.length > 0 ||
+      filters.requiredKeywords.length > 0
+    );
+  };
+
+  const handleTriggerScrape = async () => {
+    if (!hasScrapeFilters()) {
+      setError('Please select at least one job filter before scraping.');
+      return;
+    }
+
+    setScraping(true);
+    setScrapeProgress(null);
+    setError('');
+    setScrapeError('');
+
+    try {
+      const response = await api.triggerScrape(filters);
+      const session = response.session;
+      if (session?.sessionId) {
+        setScrapeSessionId(session.sessionId);
+        localStorage.setItem('scrapeSessionId', session.sessionId);
+        startScrapePolling(session.sessionId);
+      }
+    } catch (err: any) {
+      setError(err.response?.data?.error || 'Failed to start scraping');
+      setScraping(false);
+      return;
+    }
+  };
+
+  const handleCancelScrape = async () => {
+    if (!scrapeSessionId) return;
+    setScrapeError('');
+    try {
+      await api.cancelScrape(scrapeSessionId);
+      // Polling detects 'cancelled' and stops; scraping flag stays until then
+    } catch (err: any) {
+      setScrapeError(err.response?.data?.error || 'Failed to cancel scraping');
+      setScraping(false);
+    }
+  };
+
+  // Recover an in-progress scrape session after a refresh
+  useEffect(() => {
+    const storedSessionId = localStorage.getItem('scrapeSessionId');
+    if (!storedSessionId) return;
+
+    const recover = async () => {
+      try {
+        const response = await api.getScrapeProgress(storedSessionId);
+        const progress = response.progress;
+        if (progress && (progress.status === 'running' || progress.status === 'cancelling')) {
+          setScrapeSessionId(storedSessionId);
+          setScrapeProgress(progress);
+          setScraping(true);
+          startScrapePolling(storedSessionId);
+        } else {
+          localStorage.removeItem('scrapeSessionId');
+          setScrapeSessionId(null);
+        }
+      } catch {
+        localStorage.removeItem('scrapeSessionId');
+        setScrapeSessionId(null);
+      }
+    };
+
+    recover();
+  }, []);
+
+  const handleDeleteAllJobs = async () => {
+    setDeletingAllJobs(true);
+    setDeleteError('');
+    setDeleteSuccess(false);
+
+    try {
+      await api.deleteAllJobs();
+      setJobs([]);
+      setPagination(prev => ({ ...prev, total: 0, totalPages: 0 }));
+      await loadStats();
+      setDeleteSuccess(true);
+      setConfirmDeleteAll(false);
+    } catch (err: any) {
+      setDeleteError(err.response?.data?.error || 'Failed to delete job postings');
+      // Dialog stays open so the user can see the error and retry or cancel.
+    } finally {
+      setDeletingAllJobs(false);
     }
   };
 
@@ -261,6 +428,39 @@ export function Jobs() {
             Refresh
           </button>
 
+          {scraping && scrapeSessionId ? (
+            <button
+              onClick={handleCancelScrape}
+              disabled={loading}
+              className="btn-danger btn-sm"
+            >
+              <AlertCircle className="w-4 h-4" />
+              Cancel Scraping
+            </button>
+          ) : (
+            <button
+              onClick={handleTriggerScrape}
+              disabled={scraping || loading}
+              className={clsx('btn-primary btn-sm', scraping && 'opacity-50 cursor-not-allowed')}
+            >
+              {scraping ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+              {scraping ? 'Scraping…' : 'Start Scrape'}
+            </button>
+          )}
+
+          <button
+            onClick={() => setConfirmDeleteAll(true)}
+            disabled={deletingAllJobs || scraping || loading}
+            className="btn-danger btn-sm"
+          >
+            {deletingAllJobs ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Trash2 className="w-4 h-4" />
+            )}
+            {deletingAllJobs ? 'Deleting…' : 'Delete All Jobs'}
+          </button>
+
           <button
             onClick={() => setMobileFiltersOpen(true)}
             className="lg:hidden btn-secondary btn-sm"
@@ -278,6 +478,132 @@ export function Jobs() {
           </button>
         </div>
       </div>
+
+      {/* Selected filters */}
+      {hasScrapeFilters() && (
+        <div className="card p-3 mb-4 border border-primary-100 bg-primary-50">
+          <p className="text-xs font-semibold text-primary-700 uppercase tracking-wider mb-2">
+            Selected filters
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {filters.searchTerm && (
+              <span className="px-2 py-1 rounded text-xs border border-primary-200 bg-white text-primary-800">
+                {filters.searchTerm}
+              </span>
+            )}
+            {filters.locations.map((loc) => (
+              <span key={`loc-${loc}`} className="filter-chip">
+                {loc}
+              </span>
+            ))}
+            {filters.jobTypes.map((t) => (
+              <span key={`jt-${t}`} className="filter-chip">
+                {t.replace('-', ' ')}
+              </span>
+            ))}
+            {filters.experienceLevels.map((l) => (
+              <span key={`el-${l}`} className="filter-chip">
+                {l.charAt(0).toUpperCase() + l.slice(1)}
+              </span>
+            ))}
+            {filters.industries.map((i) => (
+              <span key={`ind-${i}`} className="filter-chip">
+                {i}
+              </span>
+            ))}
+            {filters.departments.map((d) => (
+              <span key={`dep-${d}`} className="filter-chip">
+                {d}
+              </span>
+            ))}
+            {filters.sources.map((s) => (
+              <span key={`src-${s}`} className="filter-chip">
+                {s.charAt(0).toUpperCase() + s.slice(1)}
+              </span>
+            ))}
+            {filters.remoteOnly && <span className="filter-chip">Remote only</span>}
+            {filters.hybridOnly && <span className="filter-chip">Hybrid only</span>}
+            {filters.salaryMin && (
+              <span className="filter-chip">Min ${filters.salaryMin.toLocaleString()}</span>
+            )}
+            {filters.salaryMax && (
+              <span className="filter-chip">Max ${filters.salaryMax.toLocaleString()}</span>
+            )}
+            {filters.postedWithinHours && (
+              <span className="filter-chip">Posted within {filters.postedWithinHours}h</span>
+            )}
+            {filters.excludedCompanies.map((c) => (
+              <span key={`ec-${c}`} className="filter-chip">
+                Not: {c}
+              </span>
+            ))}
+            {filters.excludedKeywords.map((k) => (
+              <span key={`ek-${k}`} className="filter-chip">
+                Excl: {k}
+              </span>
+            ))}
+            {filters.requiredKeywords.map((k) => (
+              <span key={`rk-${k}`} className="filter-chip">
+                Req: {k}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {deleteSuccess && (
+        <div className="card p-3 border border-green-200 bg-green-50 mb-4">
+          <p className="text-sm text-green-800 font-medium">
+            All job postings deleted successfully.
+          </p>
+        </div>
+      )}
+
+      {scrapeError && (
+        <div className="card p-3 border border-red-200 bg-red-50 mb-4">
+          <div className="flex items-start gap-2">
+            <AlertCircle className="w-4 h-4 text-red-600 mt-0.5" />
+            <p className="text-sm text-red-800 font-medium">{scrapeError}</p>
+          </div>
+          <button
+            onClick={() => setScrapeError('')}
+            className="ml-2 text-xs text-red-600 hover:text-red-800"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {confirmDeleteAll && (
+        <div className="card p-4 border border-red-200 bg-red-50 mb-4">
+          <h3 className="font-semibold text-red-900 mb-1">Delete All Job Postings?</h3>
+          <p className="text-sm text-red-800 mb-4">
+            This will permanently delete all saved job postings from your account. This action cannot be undone.
+          </p>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setConfirmDeleteAll(false)}
+              className="btn-secondary btn-sm"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleDeleteAllJobs}
+              disabled={deletingAllJobs}
+              className={clsx('btn-danger btn-sm', deletingAllJobs && 'opacity-50 cursor-not-allowed')}
+            >
+              {deletingAllJobs ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                'Yes, Delete All'
+              )}
+            </button>
+          </div>
+          {deleteError && (
+            <p className="mt-3 text-xs text-red-600">{deleteError}</p>
+          )}
+        </div>
+      )}
 
       {/* Stats */}
       {stats && (
@@ -297,6 +623,202 @@ export function Jobs() {
           <div className="card p-4">
             <p className="text-2xl font-bold text-gray-900">{Object.keys(stats.byCity).length}</p>
             <p className="text-sm text-gray-600">Cities</p>
+          </div>
+        </div>
+      )}
+
+      {/* Scrape Progress / Realtime Results */}
+      {(scrapeProgress || scraping) && (
+        <div className="card p-4">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h3 className="font-semibold text-gray-900 flex items-center gap-2">
+                <Clock className="w-5 h-5 text-primary-600" />
+                Live Scraping
+              </h3>
+              <p className="text-sm text-gray-600">
+                {scrapeProgress?.currentSource ? (
+  <>
+    Scraping from <strong>{scrapeProgress.currentSource}</strong>
+  </>
+) : (
+  'Starting scrape...'
+)}
+              </p>
+            </div>
+            <div className="flex gap-2">
+              {scraping && (
+                <button
+                  onClick={loadJobs}
+                  disabled={scraping}
+                  className="btn-outline btn-sm"
+                >
+                  Refresh results
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Overall progress bar */}
+          <div className="mb-4">
+            <div className="flex items-center justify-between mb-1 text-sm">
+              <span className="text-gray-700 font-medium">
+                Overall progress
+                {' '}
+                ({scrapeProgress?.sourceIndex ?? 0} of {scrapeProgress?.totalSources ?? 0} sources)
+              </span>
+              <span className="text-gray-700 font-mono">
+                {scrapeProgress?.jobsFound ?? 0} jobs found
+              </span>
+            </div>
+            <div className="w-full bg-gray-200 rounded-full h-3">
+              <div
+                className="bg-primary-600 h-3 rounded-full transition-all duration-500"
+                style={{
+                  width: scrapeProgress?.totalSources
+                    ? Math.min(100, ((scrapeProgress.sourceIndex ?? 0) / scrapeProgress.totalSources) * 100)
+                    : 0,
+                }}
+              />
+            </div>
+          </div>
+
+          {/* Status line */}
+          <div className="flex items-center gap-4 text-sm text-gray-600 mb-3">
+            <span
+              className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                scrapeProgress?.status === 'running'
+                  ? 'bg-green-100 text-green-800'
+                  : scrapeProgress?.status === 'cancelling'
+                  ? 'bg-amber-100 text-amber-800'
+                  : scrapeProgress?.status === 'cancelled'
+                  ? 'bg-red-100 text-red-800'
+                  : scrapeProgress?.status === 'completed'
+                  ? 'bg-blue-100 text-blue-800'
+                  : scrapeProgress?.status === 'failed'
+                  ? 'bg-red-100 text-red-800'
+                  : 'bg-gray-100 text-gray-600'
+              }`}
+            >
+              {scrapeProgress?.status || 'idle'}
+            </span>
+            {scrapeProgress?.status === 'cancelling' && (
+              <span className="font-medium text-amber-800">Cancelling scraping…</span>
+            )}
+            {scrapeProgress?.status === 'cancelled' && (
+              <span className="font-medium text-red-800">
+                Scraping cancelled. Previously saved jobs have been preserved.
+              </span>
+            )}
+            {scrapeProgress?.status === 'completed' && (
+              <span className="font-medium text-green-800">Scraping completed.</span>
+            )}
+            {scrapeProgress?.status === 'failed' && (
+              <span className="font-medium text-red-800">
+                {scrapeProgress?.message || 'Scraping failed.'}
+              </span>
+            )}
+          </div>
+
+          {/* Live counts */}
+          {scrapeProgress?.currentSource && (
+            <div className="text-sm text-gray-700 mb-3">
+              Scraping{' '}
+              <strong>
+                {scrapeProgress.currentSource.charAt(0).toUpperCase() +
+                  scrapeProgress.currentSource.slice(1)}
+              </strong>{' | '}
+              {scrapeProgress.jobsFound ?? 0} jobs found{' | '}
+              {scrapeProgress.jobsSaved ?? 0} matching jobs saved
+              {scrapeProgress.jobsSkipped != null && ` | ${scrapeProgress.jobsSkipped} skipped`}
+            </div>
+          )}
+
+          {/* Per-source references & status */}
+          <div className="mb-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm font-semibold text-gray-900">Sources (references)</span>
+              <span className="text-xs text-gray-500">per-source results</span>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {scrapeProgress?.sources.map((src: string) => {
+                const sp = scrapeProgress.sourceProgress.find((s: any) => s.source === src);
+                const status = sp?.status || 'pending';
+                return (
+                  <span
+                    key={src}
+                    className={clsx(
+                      'px-3 py-1.5 rounded-full text-xs font-medium border transition-colors',
+                      status === 'running'
+                        ? 'bg-blue-100 text-blue-800 border-blue-200 animate-pulse'
+                        : status === 'completed'
+                        ? 'bg-green-100 text-green-800 border-green-200'
+                        : status === 'failed'
+                        ? 'bg-red-100 text-red-800 border-red-200'
+                        : 'bg-gray-100 text-gray-600 border-gray-200'
+                    )}
+                  >
+                    {src.charAt(0).toUpperCase() + src.slice(1)}:{sp?.jobsFound ?? 0}
+                    {sp?.error ? <span className="ml-1 text-[10px]">⚠</span> : null}
+                  </span>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Errors */}
+          {scrapeProgress?.errors && Object.keys(scrapeProgress.errors).length > 0 && (
+            <div className="mb-4 p-3 bg-red-50 border border-red-100 rounded-lg">
+              <div className="flex items-start gap-2 mb-1">
+                <AlertCircle className="w-4 h-4 text-red-600 mt-0.5" />
+                <span className="text-sm text-red-800 font-medium">Errors</span>
+              </div>
+              <ul className="text-xs text-red-700 space-y-1 list-disc list-inside">
+                {Object.entries(scrapeProgress.errors).map(([source, msg]) => (
+                  <li key={source}>{source}: {String(msg)}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Realtime found jobs */}
+          <div className="border-t border-gray-200 pt-4">
+            <div className="flex items-center justify-between mb-3">
+              <h4 className="font-semibold text-gray-900">Jobs found (real time)</h4>
+              <span className="text-xs text-gray-500">{scrapeProgress?.foundJobs?.length ?? 0} so far</span>
+            </div>
+            {scrapeProgress?.foundJobs?.length === 0 && scraping ? (
+              <div className="p-4 text-center text-gray-500 text-sm">Waiting for first results…</div>
+            ) : (
+              <div className="max-h-64 overflow-y-auto space-y-2">
+                {scrapeProgress?.foundJobs?.slice().reverse().map((job: any) => (
+                  <div
+                    key={job._id || job.title + job.company + job.source}
+                    className="flex items-center gap-3 p-2 bg-gray-50 rounded border border-gray-100"
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-sm font-medium text-gray-900 truncate">{job.title}</span>
+                        <span className={clsx('text-xs font-medium px-1.5 py-0.5 rounded', getSourceColor(job.source))}>
+                          {job.source.charAt(0).toUpperCase() + job.source.slice(1)}
+                        </span>
+                      </div>
+                      <div className="text-xs text-gray-600 truncate">
+                        {job.company} · {job.location?.city || ''}{job.location?.city && job.location?.province ? ', ' : ''}{job.location?.province || ''}
+                      </div>
+                    </div>
+                    <a
+                      href={job.applicationUrl || job.originalJobUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs text-primary-600 hover:underline whitespace-nowrap shrink-0"
+                    >
+                      View
+                    </a>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
