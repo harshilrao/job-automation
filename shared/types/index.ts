@@ -137,6 +137,8 @@ export interface JobPosting {
   salaryCurrency: string;
   salaryPeriod: string;
   applicationUrl: string;
+  originalJobUrl?: string;
+  companyCareerUrl?: string;
   applyEmail?: string;
   postedDate: string;
   scrapedAt: string;

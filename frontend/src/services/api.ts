@@ -184,8 +184,8 @@ class ApiService {
     return response.data;
   }
 
-  async triggerScrape(filters: any) {
-    const response = await this.client.post('/jobs/scrape', { filters });
+  async triggerScrape(filters: any, options: { save?: boolean } = {}) {
+    const response = await this.client.post('/jobs/scrape', { filters, save: options.save ?? true });
     return response.data;
   }
 
@@ -196,6 +196,11 @@ class ApiService {
 
   async getScrapeProgress(sessionId?: string) {
     const response = await this.client.get('/jobs/scrape/progress', { params: { sessionId } });
+    return response.data;
+  }
+
+  async saveJob(job: any) {
+    const response = await this.client.post('/jobs/save', job);
     return response.data;
   }
 

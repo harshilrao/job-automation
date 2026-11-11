@@ -30,7 +30,7 @@ export function JobDetail() {
   const [downloadFormat, setDownloadFormat] = useState<'markdown' | 'pdf' | 'docx'>('markdown');
   const [uploadingResume, setUploadingResume] = useState(false);
   const [baseResumeText, setBaseResumeText] = useState<string>('');
-  const [resumeTone, setResumeTone] = useState<'professional' | 'enthusiastic' | 'concise' | 'storytelling'>('professional');
+  const [resumeTone] = useState<'professional' | 'enthusiastic' | 'concise' | 'storytelling'>('professional');
   const [coverLetterTone, setCoverLetterTone] = useState<'professional' | 'enthusiastic' | 'concise' | 'storytelling'>('professional');
   const [generatingCoverLetter, setGeneratingCoverLetter] = useState(false);
   const [selectedResumeForCoverLetter, setSelectedResumeForCoverLetter] = useState<string>('');
@@ -936,7 +936,7 @@ export function JobDetail() {
                   </select>
                   <select
                     value={coverLetterTone}
-                    onChange={(e) => setCoverLetterTone(e.target.value)}
+                    onChange={(e) => setCoverLetterTone(e.target.value as 'professional' | 'enthusiastic' | 'concise' | 'storytelling')}
                     className="input"
                   >
                     <option value="professional">Professional</option>

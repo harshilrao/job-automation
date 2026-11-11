@@ -37,5 +37,6 @@ router.post('/filters/:id/apply', validate(schemas.idParam), jobController.apply
 router.post('/scrape', validate(schemas.triggerScrape), jobController.triggerScrape);
 router.post('/scrape/cancel', validate(schemas.cancelScrape), jobController.cancelScrape);
 router.get('/scrape/progress', jobController.getScrapeProgress);
+router.post('/save', jobController.saveJob);
 
 export default router;
