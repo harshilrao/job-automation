@@ -217,17 +217,19 @@ export const triggerScrape = asyncHandler(async (req: AuthenticatedRequest, res:
     );
   }
 
-  console.log('[SCRAPE] Starting filter-based scraping session:', filters);
-  const session = jobScraperService.startScrape(userId, filters);
+  const { save = true } = req.body;
+  console.log('[SCRAPE] Starting filter-based scraping session:', { filters, save });
+  const session = jobScraperService.startScrape(userId, filters, { save });
 
   console.log('[SCRAPE] Session started:', {
     sessionId: session.sessionId,
     status: session.status,
+    save: session.save,
   });
 
   res.status(202).json({
-    message: 'Scraping started',
-    session: { sessionId: session.sessionId, status: session.status },
+    message: save ? 'Scraping started' : 'Search started',
+    session: { sessionId: session.sessionId, status: session.status, save: session.save },
   });
 });
 
@@ -253,6 +255,25 @@ export const cancelScrape = asyncHandler(async (req: AuthenticatedRequest, res: 
   res.json({
     message: 'Cancellation requested',
     status: 'cancelling',
+  });
+});
+
+export const saveJob = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
+  const userId = req.user?.userId;
+  if (!userId) {
+    throw createError('Authentication required', 'AUTHENTICATION_ERROR', 401);
+  }
+
+  const job = req.body;
+  if (!job || !job.source || !job.title || !job.company) {
+    throw createError('Invalid job payload', 'VALIDATION_ERROR', 400);
+  }
+
+  const result = await jobScraperService.saveSingleJob(job);
+  res.status(201).json({
+    message: result.created ? 'Job saved' : 'Job updated',
+    jobId: result.id,
+    created: result.created,
   });
 });
 

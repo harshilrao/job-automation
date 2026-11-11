@@ -4,6 +4,7 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { Shield, Bell, Palette, Database, Key, Trash2, Loader2, AlertCircle, CheckCircle, ExternalLink, Cpu, Sparkles, Download } from 'lucide-react';
 import { clsx } from 'clsx';
+import { api } from '../services/api';
 
 const settingsSchema = z.object({
   emailNotifications: z.boolean().default(true),

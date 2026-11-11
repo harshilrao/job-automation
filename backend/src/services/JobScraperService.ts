@@ -75,6 +75,7 @@ export interface ScrapeProgress {
   jobsFound: number;
   jobsSaved: number;
   jobsSkipped: number;
+  jobsFailed: number;
   errors: Record<string, string>;
   startedAt: Date | null;
   etaMs: number | null;
@@ -85,8 +86,10 @@ export interface ScrapeProgress {
     jobsFound: number;
     error?: string;
   }>;
-  /** Jobs found so far in this scrape session (capped), for real-time frontend display. */
+  /** Jobs found so far in this scrape session (capped, pre-deduplication), for real-time frontend display. */
   foundJobs: JobPost[];
+  /** Final deduplicated unique jobs, computed once all sources finish (post-deduplication). */
+  uniqueJobs?: JobPost[];
   /** Filters used by the session (snapshot), for display and refresh recovery. */
   filters?: ScrapeFilters;
   message?: string;
@@ -124,6 +127,8 @@ export interface ScrapeSession {
   userId: string;
   status: ScrapeStatus;
   filters: ScrapeFilters;
+  /** When false the scrape searches + validates but never writes to MongoDB. */
+  save: boolean;
   startTime: Date;
   endTime?: Date;
   currentSource: string | null;
@@ -131,6 +136,7 @@ export interface ScrapeSession {
   jobsDiscovered: number;
   jobsSaved: number;
   jobsSkipped: number;
+  jobsFailed: number;
   errors: Record<string, string>;
   sourceProgress: Array<{
     source: string;
@@ -139,6 +145,8 @@ export interface ScrapeSession {
     error?: string;
   }>;
   foundJobs: JobPost[];
+  /** Final deduplicated unique jobs for this session (post-deduplication), exposed to the frontend via progress. */
+  uniqueJobs: JobPost[];
   abortController: AbortController;
   pythonProcess: ChildProcess | null;
   message?: string;
@@ -166,6 +174,7 @@ export class JobScraperService {
     jobsFound: 0,
     jobsSaved: 0,
     jobsSkipped: 0,
+    jobsFailed: 0,
     errors: {},
     startedAt: null,
     etaMs: null,
@@ -201,7 +210,7 @@ export class JobScraperService {
    * the scrape runs in the background and its progress is tracked on the
    * session. Rejects when the user already has an active session.
    */
-  startScrape(userId: string, filters: ScrapeFilters): ScrapeSession {
+  startScrape(userId: string, filters: ScrapeFilters, opts: { save?: boolean } = {}): ScrapeSession {
     if (this.getActiveSession(userId)) {
       throw new Error('A scraping session is already running for this user.');
     }
@@ -212,15 +221,18 @@ export class JobScraperService {
       userId,
       status: 'running',
       filters,
+      save: opts.save ?? true,
       startTime: new Date(),
       currentSource: null,
       sourceIndex: 0,
       jobsDiscovered: 0,
       jobsSaved: 0,
       jobsSkipped: 0,
+      jobsFailed: 0,
       errors: {},
       sourceProgress: [],
       foundJobs: [],
+      uniqueJobs: [],
       abortController: new AbortController(),
       pythonProcess: null,
       message: 'Starting scrape...',
@@ -360,7 +372,10 @@ export class JobScraperService {
     const allJobs: JobPost[] = [];
     const errors: Record<string, string> = {};
 
-    const sourceList = [...cfg.sources, 'jobbank'];
+    // Only scrape the sources the user explicitly selected. Job Bank (and any
+    // other source) runs only when present in cfg.sources — never silently.
+    const sourceList = [...cfg.sources];
+    const includeJobBank = cfg.sources.includes('jobbank');
     const now = new Date();
 
     const initProgress = () => {
@@ -373,6 +388,7 @@ export class JobScraperService {
         jobsFound: 0,
         jobsSaved: 0,
         jobsSkipped: 0,
+        jobsFailed: 0,
         errors: {},
         startedAt: now,
         etaMs: this.computeEtaMs(now, 0, sourceList.length),
@@ -407,9 +423,12 @@ export class JobScraperService {
       hoursOld: cfg.hoursOld,
     });
 
-    // Scrape from each source
+    // Scrape from each source (JobSpy sites). 'jobbank' is handled separately
+    // via the Government of Canada CSV block below, so skip it here to avoid
+    // scraping it twice when the user selected it.
     let completedCount = 0;
     for (const source of cfg.sources) {
+      if (source === 'jobbank') continue;
       if (session && this.isAborted(session)) break;
 
       const setCurrent = (src: string | null) => {
@@ -506,9 +525,9 @@ export class JobScraperService {
       }
     }
 
-    // Also try Job Bank CSV (Government of Canada)
+    // Also try Job Bank CSV (Government of Canada) — only when explicitly selected.
     const jobbankSource = 'jobbank';
-    if (!session || !this.isAborted(session)) {
+    if (includeJobBank && (!session || !this.isAborted(session))) {
       if (session) {
         session.currentSource = jobbankSource;
         session.sourceIndex = sourceList.indexOf(jobbankSource);
@@ -596,16 +615,35 @@ export class JobScraperService {
 
       // Deduplicate jobs using canonical URL or normalized employer+title
       const uniqueJobs = this.deduplicateJobs(resolvedJobs);
-      console.log(`[SCRAPER] After dedup: ${uniqueJobs.length} unique jobs`);
+      console.log(
+        `[SCRAPER] After dedup: ${uniqueJobs.length} unique jobs (removed ${
+          resolvedJobs.length - uniqueJobs.length
+        } duplicates)`
+      );
+
+      // Expose the final deduplicated collection to the frontend via progress polling.
+      if (session) {
+        session.uniqueJobs = uniqueJobs;
+        this.mirrorLegacyProgress(session);
+      }
 
       // Save to database (abort-safe: stops saving once cancellation detected)
-      console.log('[SCRAPER] Saving jobs to database...');
-      const savedResult = await this.saveJobs(uniqueJobs, session ?? undefined);
-      console.log(`[SCRAPER] Saved ${savedResult.saved} new jobs to database`);
+      // When save === false this is a search-only scrape: results stay
+      // "Discovered" and nothing is written to MongoDB.
+      if (session?.save) {
+        console.log('[SCRAPER] Saving jobs to database...');
+        session.message = 'Saving jobs to database...';
+        this.mirrorLegacyProgress(session);
+        const savedResult = await this.saveJobs(uniqueJobs, session ?? undefined);
+        console.log(`[SCRAPER] Saved ${savedResult.saved} new jobs to database`);
 
-      if (session) {
         session.jobsSaved = savedResult.saved + savedResult.updated;
         session.jobsSkipped += savedResult.skipped;
+        session.jobsFailed += savedResult.failed;
+      } else if (session) {
+        console.log(`[SCRAPER] Search-only mode: ${uniqueJobs.length} jobs discovered, not saved to database.`);
+        session.message = `Discovered ${uniqueJobs.length} jobs (search only, not saved).`;
+        this.mirrorLegacyProgress(session);
       }
     }
 
@@ -681,6 +719,7 @@ export class JobScraperService {
       jobsFound: session.jobsDiscovered,
       jobsSaved: session.jobsSaved,
       jobsSkipped: session.jobsSkipped,
+      jobsFailed: session.jobsFailed,
       errors: { ...session.errors },
       startedAt: session.startTime,
       etaMs: null,
@@ -827,6 +866,7 @@ export class JobScraperService {
 import sys
 import json
 import math
+import re as _re
 import pandas as pd
 from jobspy import scrape_jobs
 
@@ -864,18 +904,32 @@ try:
         results_wanted=results_wanted,
         hours_old=hours_old,
         country_indeed=country_indeed,
+        fetch_description=True,
     )
 
     # Convert to list of dicts
     result = []
     for _, row in jobs.iterrows():
-        job_id = row.get('job_id', '')
+        job_id = safe_str(row.get('job_id', ''))
+        # Fallback: extract LinkedIn job ID from the job_url when job_id is empty.
+        if not job_id:
+            job_url = safe_str(row.get('job_url', ''))
+            m = _re.search(r'/jobs/view/(\d+)', job_url)
+            if m:
+                job_id = m.group(1)
+            else:
+                job_id = job_url.rstrip('/').split('/')[-1] if job_url else ''
+        description = safe_str(row.get('description', ''))
+        if not description:
+            print(f"[JOB:{job_id}] WARNING: no description retrieved", file=sys.stderr)
+        else:
+            print(f"[JOB:{job_id}] OK description ({len(description)} chars)", file=sys.stderr)
         job = {
-            'id': f"{source}-{safe_str(job_id)}",
+            'id': f"{source}-{job_id}",
             'title': safe_str(row.get('title', '')),
             'company': safe_str(row.get('company', '')),
             'location': safe_str(row.get('location', '')),
-            'description': safe_str(row.get('description', '')),
+            'description': description,
             'jobUrl': safe_str(row.get('job_url', '')),
             'applyUrl': safe_str(row.get('job_url', '')),
             'source': source,
@@ -1485,10 +1539,11 @@ except Exception as e:
   private async saveJobs(
     jobs: JobPost[],
     session?: ScrapeSession
-  ): Promise<{ saved: number; updated: number; skipped: number }> {
+  ): Promise<{ saved: number; updated: number; skipped: number; failed: number }> {
     let saved = 0;
     let updated = 0;
     let skipped = 0;
+    let failed = 0;
 
     console.log(`[SCRAPER] saveJobs starting with ${jobs.length} jobs${session ? ` (session ${session.sessionId})` : ''}`);
 
@@ -1518,12 +1573,41 @@ except Exception as e:
           saved++;
         }
       } catch (error: any) {
+        failed++;
         console.error(`[SCRAPER] Failed to save job ${job.id}:`, error.message);
       }
     }
 
-    console.log(`[SCRAPER] saveJobs completed: saved=${saved}, updated=${updated}, skipped=${skipped}`);
-    return { saved, updated, skipped };
+    console.log(
+      `[SCRAPER] saveJobs completed: saved=${saved}, updated=${updated}, skipped=${skipped}, failed=${failed}`
+    );
+    return { saved, updated, skipped, failed };
+  }
+
+  /**
+   * Save a single discovered job (individual "Save Job" action). Creates a new
+   * posting or updates an existing one matched by source+externalId or
+   * originalJobUrl. Returns the saved document's id and whether it was created.
+   * Abort-safe: not session-bound, so a single save always completes.
+   */
+  public async saveSingleJob(job: JobPost): Promise<{ id: string; created: boolean }> {
+    const query: any = [{ source: job.source, externalId: job.id }];
+    if (job.originalJobUrl) {
+      query.push({ originalJobUrl: job.originalJobUrl });
+    }
+
+    let existing = await JobPosting.findOne({ $or: query });
+    const created = !existing;
+
+    if (existing) {
+      await this.updateJobPosting(existing, job);
+      await existing.save();
+    } else {
+      await this.createJobPosting(job);
+    }
+
+    const doc = await JobPosting.findOne({ $or: query }).lean();
+    return { id: (doc?._id ?? existing?._id ?? job.id).toString(), created };
   }
 
   /**
