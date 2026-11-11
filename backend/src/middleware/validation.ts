@@ -256,6 +256,36 @@ export const schemas = {
     }),
   }),
 
+  // Trigger scrape
+  triggerScrape: z.object({
+    body: z.object({
+      filters: z.object({
+        searchTerm: z.string().optional(),
+        locations: z.array(z.string()).optional(),
+        jobTypes: z.array(z.string()).optional(),
+        experienceLevels: z.array(z.string()).optional(),
+        industries: z.array(z.string()).optional(),
+        departments: z.array(z.string()).optional(),
+        salaryMin: z.number().optional(),
+        salaryMax: z.number().optional(),
+        postedWithinHours: z.number().optional(),
+        remoteOnly: z.boolean().optional(),
+        hybridOnly: z.boolean().optional(),
+        sources: z.array(z.string()).optional(),
+        excludedCompanies: z.array(z.string()).optional(),
+        excludedKeywords: z.array(z.string()).optional(),
+        requiredKeywords: z.array(z.string()).optional(),
+      }).optional(),
+    }),
+  }),
+
+  // Cancel scrape
+  cancelScrape: z.object({
+    body: z.object({
+      sessionId: z.string().min(1, 'Session ID is required'),
+    }),
+  }),
+
   // Pagination
   pagination: z.object({
     query: z.object({

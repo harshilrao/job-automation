@@ -74,6 +74,9 @@
   .badge-gray {
     @apply badge bg-gray-100 text-gray-800;
   }
+  .filter-chip {
+    @apply badge bg-primary-100 text-primary-800;
+  }
 
   .table-container {
     @apply overflow-x-auto;

@@ -26,6 +26,7 @@ router.get('/filters', jobController.getSearchFilters);
 router.get('/filters/default', jobController.getDefaultSearchFilter);
 
 router.get('/:id', validate(schemas.jobId), jobController.getJobById);
+router.delete('/all', jobController.deleteAllJobs);
 router.post('/filters', validate(schemas.jobSearchFilter), jobController.saveSearchFilter);
 router.put('/filters/:id', validate(schemas.idParam), jobController.updateSearchFilter);
 router.delete('/filters/:id', validate(schemas.idParam), jobController.deleteSearchFilter);
@@ -33,6 +34,8 @@ router.post('/filters/:id/default', validate(schemas.idParam), jobController.set
 router.post('/filters/:id/apply', validate(schemas.idParam), jobController.applySavedFilter);
 
 // Admin/scraper routes
-router.post('/scrape', jobController.triggerScrape);
+router.post('/scrape', validate(schemas.triggerScrape), jobController.triggerScrape);
+router.post('/scrape/cancel', validate(schemas.cancelScrape), jobController.cancelScrape);
+router.get('/scrape/progress', jobController.getScrapeProgress);
 
 export default router;

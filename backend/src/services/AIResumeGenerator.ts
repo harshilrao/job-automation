@@ -462,7 +462,14 @@ export class AIResumeGenerator {
     const systemPrompt = this.buildResumeSystemPrompt(options.tone || 'professional');
     const userPrompt = this.buildResumeUserPrompt(jobPosting, userProfile, options.focusKeywords, options.baseResumeText);
     const groqModel = options.model || config.ai.groqModel || 'openai/gpt-oss-120b';
+    const modelId = groqModel.toLowerCase();
     console.log('[AI] Groq request:', { model: groqModel, jobTitle: jobPosting.title, company: jobPosting.company, promptLength: userPrompt.length });
+
+    const reasoningModels = new Set([
+      'openai/gpt-oss-120b',
+      'openai/gpt-oss-20b',
+      'qwen/qwen3.8-27b',
+    ]);
 
     const response = await retry(
       () => axios.post(
@@ -476,9 +483,10 @@ export class AIResumeGenerator {
           temperature: 1,
           max_completion_tokens: 4096,
           top_p: 1,
-          // reasoning_effort is only supported by Groq reasoning models (e.g. deepseek-r1).
-          // Sending it for non-reasoning models (llama, gpt-oss) causes a 400.
-          ...(groqModel.toLowerCase().includes('deepseek') || groqModel.toLowerCase().includes('r1')
+          // reasoning_effort is only supported by Groq reasoning models
+          // (e.g. gpt-oss-120b, gpt-oss-20b). Sending it for non-reasoning
+          // models (llama) causes a 400.
+          ...(reasoningModels.has(modelId)
             ? { reasoning_effort: 'high' }
             : {}),
           stream: false,

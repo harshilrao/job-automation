@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { MapPin, Clock, DollarSign, Building2, ExternalLink, Star, FileText, PenTool, Loader2, AlertCircle, CheckCircle, ArrowLeft, X, Upload } from 'lucide-react';
 import { api } from '../services/api';
@@ -37,11 +37,66 @@ export function JobDetail() {
   const [selectedResumeId, setSelectedResumeId] = useState<string>('');
   const [selectedCoverLetterId, setSelectedCoverLetterId] = useState<string>('');
 
+  // Track the latest request so stale responses from a previously viewed job
+  // can't overwrite the currently displayed job (race condition when clicking
+  // View on multiple postings quickly). We gate all state updates on
+  // `myRequestId === requestIdRef.current` so an out-of-order older response
+  // is silently ignored.
+  const requestIdRef = useRef(0);
+
   useEffect(() => {
-    if (id) {
-      loadJob();
-      loadResumes();
-    }
+    if (!id) return;
+
+    // Bump the request epoch so any in-flight request for a previous job id
+    // is treated as stale once this effect re-runs for a new id.
+    requestIdRef.current += 1;
+    const myRequestId = requestIdRef.current;
+
+    // Reset all job-dependent state so the old posting never flashes over the new one
+    setJob(null);
+    setError('');
+    setLoading(true);
+    setResumes([]);
+    setCoverLetters([]);
+    setActiveTab('details');
+
+    const fetchJob = async () => {
+      try {
+        const response = await api.getJobById(id);
+        if (myRequestId === requestIdRef.current) {
+          setJob(response.job);
+          setLoading(false);
+        }
+      } catch (err: any) {
+        if (err.name === 'CanceledError' || err.name === 'AbortError') return;
+        if (myRequestId === requestIdRef.current) {
+          setError(err.response?.data?.error || 'Failed to load job');
+          setLoading(false);
+        }
+      }
+    };
+
+    const fetchResumes = async () => {
+      try {
+        const [resumesRes, coverLettersRes] = await Promise.all([
+          api.getResumes({ jobPostingId: id }),
+          api.getCoverLetters({ jobPostingId: id }),
+        ]);
+        if (myRequestId === requestIdRef.current) {
+          setResumes(resumesRes.resumes);
+          setCoverLetters(coverLettersRes.coverLetters);
+        }
+      } catch {
+        // Resumes/cover letters failing shouldn't block job display
+      }
+    };
+
+    fetchJob();
+    fetchResumes();
+
+    return () => {
+      requestIdRef.current += 1;
+    };
   }, [id]);
 
   const loadJob = async () => {
@@ -541,8 +596,18 @@ export function JobDetail() {
     );
   }
 
-  if (!job) return null;
-
+  if (!job) {
+    return (
+      <div className="text-center py-12">
+        <AlertCircle className="w-12 h-12 text-gray-400 mx-auto mb-4" />
+        <h2 className="text-lg font-medium text-gray-900 mb-2">Job not found</h2>
+        <p className="text-gray-600 mb-6">The job posting you're looking for is no longer available.</p>
+        <button onClick={() => navigate(-1)} className="btn-primary">
+          Back to Job Search
+        </button>
+      </div>
+    );
+  }
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -658,8 +723,24 @@ export function JobDetail() {
               <div className="prose prose-gray max-w-none">
                 {job.descriptionHtml ? (
                   <div dangerouslySetInnerHTML={{ __html: job.descriptionHtml }} />
-                ) : (
+                ) : job.description && job.description.trim().length > 0 &&
+                  job.description.toLowerCase() !== 'none' &&
+                  job.description.toLowerCase() !== 'nan' ? (
                   <pre className="whitespace-pre-wrap text-gray-700">{job.description}</pre>
+                ) : (
+                  <div className="p-4 bg-gray-50 rounded border border-gray-200 text-center">
+                    <p className="text-gray-500 text-sm">No description available for this job posting.</p>
+                    {job.applicationUrl && (
+                      <a
+                        href={job.applicationUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-primary-600 text-sm hover:underline mt-2 inline-block"
+                      >
+                        Open original posting to view full description
+                      </a>
+                    )}
+                  </div>
                 )}
               </div>
             </div>
